@@ -15,6 +15,9 @@ from config import GRID_WIDTH, GRID_HEIGHT, SIM_YEARS, INITIAL_SETTLEMENT_COUNT
 from simulation.geography import Geography, pick_settlement_sites
 from simulation.settlement import Settlement, SettlementManager
 from simulation.person import Person, PersonManager
+from simulation.informants import (
+    Informant, InformantManager, KnowledgeEntry,
+)
 from simulation.events import HistoricalEvent, EventGenerator
 from simulation.evidence import (
     EVIDENCE_RECIPES, Evidence, EvidenceGenerator,
@@ -89,6 +92,8 @@ class World:
     evidence: dict[str, Evidence] = field(default_factory=dict)
     records: dict[str, HistoricalRecord] = field(default_factory=dict)
     persons: dict[str, Person] = field(default_factory=dict)
+    informants: dict[str, Informant] = field(default_factory=dict)
+    knowledge_entries: dict[str, KnowledgeEntry] = field(default_factory=dict)
     storage_sites: dict[str, StorageSite] = field(default_factory=dict)
     event_history_by_settlement: dict[str, list[str]] = field(default_factory=dict)
 
@@ -97,6 +102,7 @@ class World:
     _evidence_gen: Optional[EvidenceGenerator] = None
     _record_gen: Optional[RecordGenerator] = None
     _person_mgr: Optional[PersonManager] = None
+    _informant_mgr: Optional[InformantManager] = None
     _storage_mgr: Optional[StorageManager] = None
 
     # 追踪状态
@@ -127,6 +133,8 @@ class World:
         self._evidence_gen = EvidenceGenerator(self.seed)
         self._record_gen = RecordGenerator(self.seed)
         self._person_mgr = PersonManager(self.seed)
+        self._informant_mgr = InformantManager(
+            self.seed, self.informants, self.knowledge_entries)
         self._storage_mgr = StorageManager(self.seed, self.storage_sites)
 
         # Phase 2: 初始化规则与效果系统
@@ -148,6 +156,7 @@ class World:
             self._pop_milestones[stl.id] = 500
 
             ruler = self._create_initial_ruler_and_heir(stl, 0)
+            self._informant_mgr.ensure_settlement_roles(self, stl, 0)
 
             event = self._event_gen.generate_founding_event(
                 stl.id, stl.name, 0, stl.ruler_name, ruler.id)
@@ -176,6 +185,7 @@ class World:
 
         # Phase B2: notable-person mortality and political succession.
         self._tick_people(year)
+        self._informant_mgr.ensure_all_roles(self, year)
 
         # Phase C: 计算压力
         self._pressures_cache = compute_all_pressures(self)
@@ -1194,6 +1204,8 @@ class World:
                 self._storage_mgr.assign_evidence(
                     evd, settlement, evd.created_year,
                     owner_person_id=(record.author_person_id if record else None))
+            self._informant_mgr.distribute_carrier(
+                self, evd, record, event.year)
 
     # ---- 证据衰减 ----
 
@@ -1293,7 +1305,7 @@ class World:
     def to_dict(self) -> dict:
         """序列化世界状态（不含 Geography numpy 数组，可从 seed 重现）。"""
         return {
-            "schema_version": 7,
+            "schema_version": 8,
             "seed": self.seed,
             "name": self.name,
             "current_year": self.current_year,
@@ -1302,6 +1314,10 @@ class World:
             "evidence": [e.to_dict() for e in self.evidence.values()],
             "records": [record.to_dict() for record in self.records.values()],
             "persons": [person.to_dict() for person in self.persons.values()],
+            "informants": [
+                informant.to_dict() for informant in self.informants.values()],
+            "knowledge_entries": [
+                entry.to_dict() for entry in self.knowledge_entries.values()],
             "storage_sites": [
                 site.to_dict() for site in self.storage_sites.values()],
             "event_history_by_settlement": {
@@ -1338,6 +1354,16 @@ class World:
             person_data["id"]: Person.from_dict(person_data)
             for person_data in data.get("persons", [])
         }
+        w.informants = {
+            item["id"]: Informant.from_dict(item)
+            for item in data.get("informants", [])
+        }
+        w.knowledge_entries = {
+            item["id"]: KnowledgeEntry.from_dict(item)
+            for item in data.get("knowledge_entries", [])
+        }
+        w._informant_mgr = InformantManager(
+            w.seed, w.informants, w.knowledge_entries)
         for settlement in w.settlements.values():
             if settlement.ruler_id in w.persons:
                 continue
@@ -1486,6 +1512,9 @@ class World:
             settlement_id: dict(sources)
             for settlement_id, sources in data.get("_state_cause_sources", {}).items()
         }
+        if "informants" not in data:
+            w._informant_mgr.ensure_all_roles(w, w.current_year)
+            w._informant_mgr.rebuild_current_knowledge(w, w.current_year)
         return w
 
     # ---- 查询接口 ----
@@ -1508,6 +1537,26 @@ class World:
 
     def get_settlement(self, settlement_id: str) -> Optional[Settlement]:
         return self.settlements.get(settlement_id)
+
+    def get_available_informants(
+            self, settlement_id: str,
+            roles: set[str] | None = None) -> list[Informant]:
+        if self._informant_mgr is None:
+            self._informant_mgr = InformantManager(
+                self.seed, self.informants, self.knowledge_entries)
+        return self._informant_mgr.active_informants(
+            self, settlement_id, roles)
+
+    def get_informant_knowledge(
+            self, informant_id: str) -> list[KnowledgeEntry]:
+        informant = self.informants.get(informant_id)
+        if informant is None:
+            return []
+        return [
+            self.knowledge_entries[entry_id]
+            for entry_id in informant.known_entry_ids
+            if entry_id in self.knowledge_entries
+        ]
 
     def get_person(self, person_id: str) -> Optional[Person]:
         return self.persons.get(person_id)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from game.investigation import ConsultationResult, SourceStatement
+
 
 STATUS_THRESHOLDS = (
     (0.82, "高度可信"),
@@ -23,6 +25,7 @@ class KnownClaim:
     supporting_evidence_ids: list[str] = field(default_factory=list)
     contradicting_evidence_ids: list[str] = field(default_factory=list)
     source_record_roots: list[str] = field(default_factory=list)
+    supporting_statement_ids: list[str] = field(default_factory=list)
     base_confidence: float = 0.0
     confidence: float = 0.0
     status: str = "传闻"
@@ -43,6 +46,8 @@ class KnownClaim:
             "supporting_evidence_ids": list(self.supporting_evidence_ids),
             "contradicting_evidence_ids": list(self.contradicting_evidence_ids),
             "source_record_roots": list(self.source_record_roots),
+            "supporting_statement_ids": list(
+                self.supporting_statement_ids),
             "base_confidence": self.base_confidence,
             "confidence": self.confidence,
             "status": self.status,
@@ -62,6 +67,8 @@ class KnownClaim:
             contradicting_evidence_ids=list(
                 data.get("contradicting_evidence_ids", [])),
             source_record_roots=list(data.get("source_record_roots", [])),
+            supporting_statement_ids=list(data.get(
+                "supporting_statement_ids", [])),
             base_confidence=float(data.get(
                 "base_confidence", data.get("confidence", 0.0))),
             confidence=float(data.get("confidence", 0.0)),
@@ -73,6 +80,8 @@ class KnownClaim:
 class PlayerKnowledge:
     discovered_evidence_ids: set[str] = field(default_factory=set)
     known_claims: dict[str, KnownClaim] = field(default_factory=dict)
+    source_statements: dict[str, SourceStatement] = field(default_factory=dict)
+    consultations: dict[str, ConsultationResult] = field(default_factory=dict)
 
     def discover_evidence(self, evidence_id: str) -> None:
         self.discovered_evidence_ids.add(evidence_id)
@@ -97,6 +106,64 @@ class PlayerKnowledge:
                 claim, record, evidence, comprehension, expertise_bonus))
         self._mark_contradictions()
         return learned
+
+    def learn_from_consultation(
+            self, result: ConsultationResult) -> list[KnownClaim]:
+        """Store one sourced consultation without rewarding repetition."""
+        if result.id in self.consultations:
+            return []
+        self.consultations[result.id] = result
+        learned = []
+        for statement in result.statements:
+            if statement.id in self.source_statements:
+                continue
+            self.source_statements[statement.id] = statement
+            if statement.claim is None:
+                continue
+            if statement.comprehension + statement.expertise_bonus < 0.20:
+                continue
+            learned.append(self._add_statement_support(statement))
+        self._mark_contradictions()
+        return learned
+
+    def _add_statement_support(
+            self, statement: SourceStatement) -> KnownClaim:
+        claim = statement.claim
+        key = claim.semantic_key()
+        known = self.known_claims.get(key)
+        if known is None:
+            known = KnownClaim(
+                subject=claim.subject,
+                predicate=claim.predicate,
+                object=claim.object,
+                statement_cn=claim.statement_cn,
+                time_range=claim.time_range,
+            )
+            self.known_claims[key] = known
+        if statement.id not in known.supporting_statement_ids:
+            known.supporting_statement_ids.append(statement.id)
+        if (statement.source_evidence_id
+                and statement.source_evidence_id
+                not in known.supporting_evidence_ids):
+            known.supporting_evidence_ids.append(
+                statement.source_evidence_id)
+        if (statement.source_record_root_id
+                and statement.source_record_root_id
+                not in known.source_record_roots):
+            known.source_record_roots.append(
+                statement.source_record_root_id)
+        known.time_range = (
+            min(known.time_range[0], claim.time_range[0]),
+            max(known.time_range[1], claim.time_range[1]),
+        )
+        self._recompute_confidence_values(
+            known,
+            statement.perspective,
+            statement.carrier_condition,
+            statement.comprehension,
+            statement.expertise_bonus,
+        )
+        return known
 
     def _add_support(self, claim, record, evidence, comprehension: float,
                      expertise_bonus: float) -> KnownClaim:
@@ -148,6 +215,15 @@ class PlayerKnowledge:
     def _recompute_confidence(self, known: KnownClaim, perspective: str,
                               evidence, comprehension: float,
                               expertise_bonus: float) -> None:
+        condition = (
+            evidence.current_durability / evidence.max_durability
+            if evidence.max_durability > 0 else 0.0)
+        self._recompute_confidence_values(
+            known, perspective, condition, comprehension, expertise_bonus)
+
+    def _recompute_confidence_values(
+            self, known: KnownClaim, perspective: str, condition: float,
+            comprehension: float, expertise_bonus: float) -> None:
         reliability = {
             "scholarly": 0.14,
             "merchant": 0.12,
@@ -157,9 +233,6 @@ class PlayerKnowledge:
             "opposition": 0.06,
             "folk": 0.03,
         }.get(perspective, 0.05)
-        condition = (
-            evidence.current_durability / evidence.max_durability
-            if evidence.max_durability > 0 else 0.0)
         independent_sources = len(known.source_record_roots)
         confidence = (
             0.18 + reliability
@@ -204,6 +277,14 @@ class PlayerKnowledge:
                 key: claim.to_dict()
                 for key, claim in self.known_claims.items()
             },
+            "source_statements": {
+                key: statement.to_dict()
+                for key, statement in self.source_statements.items()
+            },
+            "consultations": {
+                key: consultation.to_dict()
+                for key, consultation in self.consultations.items()
+            },
         }
 
     @classmethod
@@ -214,5 +295,13 @@ class PlayerKnowledge:
             known_claims={
                 key: KnownClaim.from_dict(value)
                 for key, value in data.get("known_claims", {}).items()
+            },
+            source_statements={
+                key: SourceStatement.from_dict(value)
+                for key, value in data.get("source_statements", {}).items()
+            },
+            consultations={
+                key: ConsultationResult.from_dict(value)
+                for key, value in data.get("consultations", {}).items()
             },
         )

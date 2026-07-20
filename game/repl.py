@@ -4,6 +4,14 @@ GameREPL：CLI 交互式探险 REPL。
 """
 
 import sys
+from game.consultation import ConsultationEngine
+from game.investigation import (
+    ConsultantView,
+    EvidencePublicView,
+    HeldKnowledgeView,
+    ReadingPublicView,
+    RecordPublicView,
+)
 from game.knowledge import PlayerKnowledge
 from simulation.world import World
 from narrative.llm_interface import generate_narrative, is_llm_available, clear_cache
@@ -27,6 +35,7 @@ class GameREPL:
         self.read_evidence: set[str] = set()
         self.known_events: set[str] = set()
         self.knowledge = PlayerKnowledge()
+        self._consultation_engine = ConsultationEngine()
         # Language progression will extend this set in a later phase.
         self.known_languages: set[str] = {"common"}
 
@@ -86,6 +95,9 @@ class GameREPL:
 
             elif cmd in ("locations", "settlements", "places"):
                 self.cmd_locations()
+
+            elif cmd in ("consultants", "people", "experts"):
+                self.cmd_consultants()
 
             elif cmd.startswith("search "):
                 query = cmd[len("search "):].strip()
@@ -194,15 +206,12 @@ class GameREPL:
 
 
     def cmd_present(self, request: str):
-        """Show examined evidence to a local scholar or residents."""
+        """Show examined evidence through the truth-isolated service."""
         if " to " not in request:
             print("用法：present <编号/名字> to <scholar/villager>")
             return
         target, audience = request.rsplit(" to ", 1)
         audience = audience.strip().lower()
-        if audience not in {"scholar", "villager"}:
-            print("目前可以向 scholar 或 villager 出示证物。")
-            return
         evd = self._resolve_local_evidence(target.strip())
         if evd is None:
             return
@@ -210,82 +219,124 @@ class GameREPL:
             print(f"你需要先 examine {_evidence_display_name(evd)}。")
             return
 
-        record = self.world.records.get(evd.source_record_id)
-        clues = evd.provenance_clues
-        date_range = clues.get("estimated_year_range")
+        informant = self._find_local_informant(audience)
+        legacy_person = None
         if audience == "scholar":
-            consultant = self._find_local_consultant()
-            if consultant is None:
-                print("这里暂时找不到能够辨认这类材料的学者或抄写员。")
+            legacy_person = self._find_unregistered_scholar()
+        if legacy_person is not None:
+            consultant = ConsultantView.scholar(legacy_person)
+            held_knowledge = ()
+        elif informant is not None:
+            person = self.world.persons.get(informant.person_id)
+            if person is None or not person.alive:
+                print("这位咨询者目前不在这里。")
                 return
-            print(f"\n--- 向{consultant.name}出示 {_evidence_display_name(evd)} ---")
-            if date_range:
-                print(f"{consultant.name}估计其书写或制作年代约在"
-                      f"第{date_range[0]}年至第{date_range[1]}年之间。")
-            if evd.is_copy_of:
-                print(f"{consultant.name}注意到装订和笔迹不一致，认为它可能是转抄本。")
-            if record is None:
-                print("仅凭这些材料与加工痕迹，还不能把它归到某一件历史事件。")
-                return
-            reading = read_document(evd, {record.language_code})
-            comprehension = reading.get("readability", 0.0)
-            learned = self.knowledge.learn_from_record(
-                record, evd, comprehension, expertise_bonus=0.35)
-            if learned:
-                print(f"{consultant.name}辨认出的只是记录本身的主张：")
-                self._print_learned_claims(learned, indent="  ")
-            else:
-                print("残留文字不足以组成可复述的主张。")
-            return
-
-        print(f"\n--- 向当地居民出示 {_evidence_display_name(evd)} ---")
-        if date_range:
-            print("居民只能判断它不像近期留下的东西。")
-        if record is None:
-            oral_carrier = self._find_related_oral_account(evd)
-            if oral_carrier is None:
-                print("没有人认出它对应哪段往事；几种猜测彼此矛盾。")
-                return
-            record = self.world.records.get(oral_carrier.source_record_id)
-            if record is None:
-                print("有人想起一段残缺说法，但已经无法连续复述。")
-                return
-            self.knowledge.discover_evidence(oral_carrier.id)
-            learned = self.knowledge.learn_from_record(
-                record, oral_carrier, comprehension=0.55)
-            print("一位居民把这些痕迹与当地口述联系起来；这只是其所知版本：")
-            self._print_learned_claims(learned, indent="  ")
-            return
-        learned = self.knowledge.learn_from_record(
-            record, evd, comprehension=0.20, expertise_bonus=0.10)
-        if learned:
-            print("一位居民认出了其中流传过的说法，但提醒你当地版本并不统一：")
-            self._print_learned_claims(learned, indent="  ")
+            consultant = ConsultantView.from_informant(informant, person)
+            held_knowledge = self._informant_knowledge_views(informant)
         else:
-            print("居民认得一些字形或纹样，却无法给出连续的解释。")
+            print(
+                "这里找不到对应的咨询者。可使用 scholar、scribe、elder、"
+                "villager、merchant、artisan，或输入当地咨询者的姓名。")
+            return
+
+        evidence_view = EvidencePublicView.from_evidence(evd)
+        record_view = self._record_public_view(evd)
+        reading_view = None
+        if evd.evidence_type == "document":
+            reading = read_document(evd, set(consultant.known_languages))
+            reading_view = ReadingPublicView.from_result(reading)
+
+        result = self._consultation_engine.consult(
+            evidence_view,
+            consultant,
+            reading=reading_view,
+            record=record_view,
+            held_knowledge=held_knowledge,
+        )
+        learned = self.knowledge.learn_from_consultation(result)
+
+        print(f"\n--- 向{consultant.name}出示 {_evidence_display_name(evd)} ---")
+        for note in result.notes_cn:
+            print(note)
+        for statement in result.statements:
+            if statement.claim is None:
+                print(statement.statement_cn)
+
+        if learned and consultant.role in {"scholar", "scribe"}:
+            print(f"{consultant.name}辨认出的只是记录本身的主张：")
+            self._print_learned_claims(learned, indent="  ")
+        elif learned:
+            print(f"{consultant.name}强调，这只是其所知版本：")
+            self._print_learned_claims(learned, indent="  ")
+        elif result.claim_statements:
+            print("这次复核没有为游记增加新的独立说法。")
 
 
-    def _find_related_oral_account(self, evidence):
-        source_events = set(evidence.source_event_ids)
-        if not source_events:
+    def _record_public_view(self, evidence):
+        record = self.world.records.get(evidence.source_record_id)
+        if record is None:
             return None
-        candidates = [
-            item for item in self.world.evidence.values()
-            if item.location_id == self.current_location_id
-            and item.evidence_type == "oral"
-            and item.state != "destroyed"
-            and item.source_record_id is not None
-            and source_events.intersection(item.source_event_ids)
+        return RecordPublicView.from_record_and_evidence(record, evidence)
+
+
+    def _informant_knowledge_views(
+            self, informant) -> tuple[HeldKnowledgeView, ...]:
+        views = []
+        for entry in sorted(
+                self.world.get_informant_knowledge(informant.id),
+                key=lambda item: item.id):
+            evidence = self.world.evidence.get(entry.source_evidence_id)
+            record = self.world.records.get(entry.source_record_id)
+            if evidence is None or record is None:
+                continue
+            view = HeldKnowledgeView.from_entry_record_and_evidence(
+                entry, record, evidence)
+            if view.record.claims:
+                views.append(view)
+        return tuple(views)
+
+
+    def _find_local_informant(self, audience: str):
+        aliases = {
+            "villager": {"elder"},
+            "elder": {"elder"},
+            "scholar": {"scholar", "scribe"},
+            "scribe": {"scribe"},
+            "merchant": {"merchant"},
+            "artisan": {"artisan"},
+        }
+        candidates = self.world.get_available_informants(
+            self.current_location_id)
+        normalized = audience.casefold()
+        named = [
+            informant for informant in candidates
+            if self.world.persons[informant.person_id].name.casefold()
+            == normalized
         ]
-        return sorted(candidates, key=lambda item: item.id)[0] \
-            if candidates else None
+        if named:
+            return named[0]
+        roles = aliases.get(normalized)
+        if roles is None:
+            return None
+        role_order = {
+            role: index for index, role in enumerate(
+                ("scholar", "scribe", "elder", "merchant", "artisan"))
+        }
+        matching = [
+            informant for informant in candidates if informant.role in roles]
+        return sorted(matching, key=lambda item: (
+            role_order.get(item.role, 99), item.id))[0] if matching else None
 
 
-    def _find_local_consultant(self):
+    def _find_unregistered_scholar(self):
         roles = {"scholar", "scribe", "writer"}
+        registered = {
+            informant.person_id for informant in self.world.informants.values()
+        }
         candidates = [
             person for person in self.world.persons.values()
             if person.alive and person.settlement_id == self.current_location_id
+            and person.id not in registered
             and roles.intersection(person.roles)
         ]
         return sorted(candidates, key=lambda person: person.id)[0] \
@@ -406,6 +457,32 @@ class GameREPL:
         self.cmd_map()
 
 
+    def cmd_consultants(self):
+        """List living, persistent informants at the current location."""
+        if self.current_location_id is None:
+            print("你还没有到达任何聚落。")
+            return
+        informants = self.world.get_available_informants(
+            self.current_location_id)
+        if not informants:
+            print("这里目前没有可以请教的人。")
+            return
+        role_names = {
+            "scholar": "学者",
+            "scribe": "书记",
+            "elder": "地方长者",
+            "merchant": "商人",
+            "artisan": "工匠",
+        }
+        print("\n===== 当地咨询者 =====")
+        for informant in informants:
+            person = self.world.persons[informant.person_id]
+            entries = len(informant.known_entry_ids)
+            print(
+                f"  {person.name} — {role_names.get(informant.role, informant.role)}"
+                f"，掌握 {entries} 条有来源的知识")
+
+
     def cmd_search(self, query: str):
         """在已知知识中搜索。"""
         results = list(self.knowledge.search(query))
@@ -466,10 +543,11 @@ def print_help():
   look / l            重新观察当前地点
   travel to <地名>    前往指定地点
   locations / map     查看所有已知地点
+  consultants         查看当地可咨询的人及其身份
   examine <编号/名字> 仔细检查一件证据
   read <编号/名字>    阅读已检查过的文书
-  present <证物> to scholar/villager
-                      向当地学者或居民出示证物
+  present <证物> to <咨询者>
+                      可选 scholar/scribe/elder/villager/merchant/artisan 或姓名
   search <关键词>     在游记和已检查证物中搜索
 
 笔记：
