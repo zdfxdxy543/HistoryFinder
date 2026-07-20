@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HistoryFinder World Viewer</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand-block">
+      <div class="brand-mark" aria-hidden="true">HF</div>
+      <div>
+        <h1>HistoryFinder</h1>
+        <p>World Viewer</p>
+      </div>
+      <span class="mode-badge">只读 · 模拟真相</span>
+    </div>
+    <form id="world-form" class="world-controls">
+      <label>种子<input id="seed-input" name="seed" type="number" value="42" min="-1000000" max="1000000"></label>
+      <label>年数<input id="years-input" name="years" type="number" value="100" min="0" max="300"></label>
+      <button type="submit" class="primary-button">生成世界</button>
+    </form>
+  </header>
+
+  <section id="summary-strip" class="summary-strip" aria-label="世界摘要"></section>
+
+  <nav class="view-tabs" aria-label="查看器视图">
+    <button class="tab-button active" data-view="map" aria-selected="true">地图</button>
+    <button class="tab-button" data-view="timeline" aria-selected="false">时间线</button>
+    <button class="tab-button" data-view="people" aria-selected="false">人物</button>
+    <button class="tab-button" data-view="archive" aria-selected="false">档案</button>
+  </nav>
+
+  <main id="app-main">
+    <section id="view-map" class="app-view active">
+      <div class="map-toolbar toolbar-band">
+        <label class="check-control"><input id="toggle-labels" type="checkbox" checked> 聚落名称</label>
+        <label class="check-control"><input id="toggle-relations" type="checkbox" checked> 外交关系</label>
+        <label class="check-control"><input id="toggle-ruins" type="checkbox" checked> 废墟</label>
+        <span id="map-coordinate" class="toolbar-readout">坐标 --, --</span>
+      </div>
+      <div class="map-layout">
+        <div class="map-stage">
+          <canvas id="world-map" aria-label="世界地形和聚落地图"></canvas>
+          <div id="map-legend" class="map-legend"></div>
+        </div>
+        <aside id="map-inspector" class="inspector" aria-label="地图详情"></aside>
+      </div>
+    </section>
+
+    <section id="view-timeline" class="app-view">
+      <div class="toolbar-band filter-toolbar">
+        <label class="search-field">搜索<input id="event-search" type="search" placeholder="标题、类型、描述"></label>
+        <label>事件类型<select id="event-type-filter"><option value="">全部</option></select></label>
+        <label>聚落<select id="event-settlement-filter"><option value="">全部</option></select></label>
+        <label class="check-control"><input id="event-causal-filter" type="checkbox"> 仅因果事件</label>
+        <span id="event-result-count" class="toolbar-readout"></span>
+      </div>
+      <div class="data-layout">
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>年份</th><th>事件</th><th>类型</th><th>地点</th><th>原因</th><th>记录</th></tr></thead>
+            <tbody id="event-table-body"></tbody>
+          </table>
+        </div>
+        <aside id="timeline-inspector" class="inspector" aria-label="事件详情"></aside>
+      </div>
+    </section>
+
+    <section id="view-people" class="app-view">
+      <div class="toolbar-band filter-toolbar">
+        <label class="search-field">搜索<input id="people-search" type="search" placeholder="姓名或聚落"></label>
+        <label>角色<select id="people-role-filter"><option value="">全部</option></select></label>
+        <label class="check-control"><input id="people-alive-filter" type="checkbox"> 仅在世</label>
+        <span id="people-result-count" class="toolbar-readout"></span>
+      </div>
+      <div class="data-layout">
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>姓名</th><th>角色</th><th>聚落</th><th>生卒</th><th>事件</th></tr></thead>
+            <tbody id="people-table-body"></tbody>
+          </table>
+        </div>
+        <aside id="people-inspector" class="inspector" aria-label="人物详情"></aside>
+      </div>
+    </section>
+
+    <section id="view-archive" class="app-view">
+      <div class="toolbar-band filter-toolbar">
+        <div class="segmented-control" role="group" aria-label="档案类型">
+          <button class="segment active" data-archive="records">记录</button>
+          <button class="segment" data-archive="evidence">证物</button>
+        </div>
+        <label class="search-field">搜索<input id="archive-search" type="search" placeholder="类型、视角、材质、正文"></label>
+        <label id="archive-kind-label">视角<select id="archive-kind-filter"><option value="">全部</option></select></label>
+        <span id="archive-result-count" class="toolbar-readout"></span>
+      </div>
+      <div class="data-layout">
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead id="archive-table-head"></thead>
+            <tbody id="archive-table-body"></tbody>
+          </table>
+        </div>
+        <aside id="archive-inspector" class="inspector" aria-label="档案详情"></aside>
+      </div>
+    </section>
+  </main>
+
+  <div id="loading-overlay" class="loading-overlay" role="status" aria-live="polite">
+    <div class="loading-box"><span class="spinner" aria-hidden="true"></span><span id="loading-text">正在生成世界...</span></div>
+  </div>
+  <div id="toast" class="toast" role="alert"></div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

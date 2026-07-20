@@ -1,0 +1,908 @@
+HistoryFinder 调查闭环底层系统设计方案
+======================================
+
+文档状态：实施前设计稿
+适用范围：正式游戏 UI 开发之前的底层调查机制
+建议实施优先级：高
+核心原则：玩家获得的是“有来源的说法与推论”，不是模拟器内部真相
+
+
+一、设计结论
+============
+
+下一阶段应当把现有的 examine、read、present 和 PlayerKnowledge 原型整理成一个独立、可测试、与 UI 无关的调查领域层。
+
+目标闭环为：
+
+发现证物
+-> 检查可观察特征
+-> 阅读或请人辨认
+-> 获得带来源的主张与解释
+-> 对比独立来源
+-> 发现支持、矛盾和缺口
+-> 由玩家提出假说
+-> 系统评估假说目前得到的支持程度
+-> 玩家继续寻找能够区分不同解释的新材料
+
+本阶段不制作正式游戏 UI。现有 REPL 作为最小交互入口，世界查看器后续增加调试面板。所有核心能力必须通过普通 Python 接口调用，避免将规则写死在命令行或页面事件中。
+
+
+二、项目现状
+============
+
+1. 已有基础
+-----------
+
+当前项目已经具备调查系统需要的大部分上游数据：
+
+- simulation.events.HistoricalEvent 保存模拟器内部真实事件。
+- simulation.records.HistoricalRecord 保存立场受限的当时记录。
+- simulation.records.Claim 保存记录所声称的结构化事实。
+- simulation.evidence.Evidence 保存物理载体、留存主张、来源线索、状态和位置。
+- narrative.document_reader 能依据保存状态和语言返回有限的可读文字。
+- game.knowledge.PlayerKnowledge 能从文书主张建立 KnownClaim，并识别同主题的冲突对象。
+- game.repl 已支持 examine、read、journal 和 present。
+- Person 已有身份、出生年份、所在地和角色，可作为专家生成的基础。
+
+这些内容应当保留，下一阶段以增量重构为主，不重新设计历史生成器。
+
+2. 当前原型的主要问题
+---------------------
+
+2.1 调查规则写在 UI 层
+
+game/repl.py 的 cmd_present 同时负责解析命令、选择咨询者、判断能力、读取文书、生成解释、修改玩家知识和输出文字。正式 UI 若直接复用，只能复制同一套逻辑，容易产生行为不一致。
+
+2.2 NPC 没有自己的知识状态
+
+当前 scholar 只是拥有 scholar/scribe/writer 角色的人物；villager 是没有实体和记忆的抽象入口。NPC 的年龄、经历、所在地、专业、接触过的文书和口述传统都没有参与判断。
+
+2.3 存在隐蔽的真相泄漏
+
+当前 _find_related_oral_account 通过 Evidence.source_event_ids 的交集查找与物品“对应”的口述记录。虽然事件 ID 没有显示给玩家，但这一过程等于让居民凭内部真相关联自动认出证物。
+
+正式系统中，调查运行时不得使用 source_event_ids、event_id、event.title 或 event.details 来帮助 NPC 建立联系。NPC 只能使用自己持有的知识、证物的可观察特征、可读文字和玩家已经提出的话题。
+
+2.4 KnownClaim 丢失了部分来源信息
+
+KnownClaim 目前记录 supporting_evidence_ids 和 source_record_roots，但不能回答：
+
+- 这条内容是玩家亲自读到，还是某位学者解释的？
+- NPC 说的是文书原文、专业判断，还是当地传闻？
+- 同一证物被两个人重复解释，是否仍算同一个来源？
+- 某个判断的依据是字形、材料、内容还是口述记忆？
+
+2.5 置信度模型过于线性
+
+当前算法将记录立场、保存状态、独立来源数量和理解度相加。它没有充分区分原件与抄本、观察与传闻、专业是否匹配、多个来源是否真正独立，也没有保存每次分数变化的原因。
+
+2.6 玩家还不能主动提出解释
+
+目前 journal 只是自动列出 KnownClaim。玩家不能创建假说、选择支持材料、标记反证或保留多个竞争解释，因此“调查”仍接近自动收集信息。
+
+
+三、设计目标与非目标
+====================
+
+1. 设计目标
+-----------
+
+- 核心规则与 REPL、查看器和未来正式 UI 解耦。
+- NPC 只能根据自身能力和实际持有的知识解释材料。
+- 同一证物交给不同 NPC，应得到范围和质量不同的回答。
+- 所有回答都标明来源类型、依据、限制和不确定性。
+- 证物描述继续只包含可观察特征，不出现历史结论。
+- 文书内容只是文书的主张，不自动等于真实事件。
+- 玩家可以保存相互矛盾的主张，并建立多个竞争假说。
+- 抄本可以改善可读性，但不能伪装成新的独立来源。
+- 不使用 LLM 也能完成全部判断和中文输出。
+- 相同世界种子、相同玩家状态和相同行动必须得到相同结果。
+- 每个结论都能追溯到证物、记录、咨询者和具体调查动作。
+
+2. 非目标
+---------
+
+- 本阶段不制作正式游戏 UI。
+- 不模拟每一个普通居民的完整人生。
+- 不加入完整语言学习系统，只预留 language_code 和 proficiency 接口。
+- 不让 NPC 直接判断某个 HistoricalEvent 是否真实。
+- 不让系统自动替玩家选择唯一正确历史。
+- 不使用 LLM 决定主张、专业判断、置信度或知识变化。
+- 不在本阶段实现复杂对话树、好感度、金钱和任务奖励。
+
+
+四、必须维持的信息边界
+======================
+
+系统继续遵守四层历史模型：
+
+1. Truth：模拟真相
+
+由 HistoricalEvent 和世界状态保存。只允许世界模拟、调试工具和测试夹具读取。
+
+2. Record：当时记录
+
+由 HistoricalRecord 和 Claim 保存。记录可以遗漏、偏向、误记或互相矛盾。记录不是玩家知识，必须先经过物理载体、阅读或口述传播。
+
+3. Evidence：留存证据
+
+由 Evidence 保存。它是玩家能发现的载体，包含物理特征、保存状态、书写内容、留存 claim ID 和来源线索。内部关联 ID 可以用于模拟阶段维护谱系，但不得作为调查判断输入。
+
+4. Knowledge：玩家认知
+
+由 PlayerKnowledge 保存。只能通过玩家完成的观察、阅读、咨询和比较动作增加。它可以不完整、错误或矛盾。
+
+新增一条强制规则：
+
+“调查运行时接口”不得接收 World.events 或 HistoricalEvent。咨询引擎只接收公开证物视图、允许读取的 HistoricalRecord 视图、NPC 知识条目和玩家当前问题。
+
+建议为此建立显式 DTO，而不是把整个 World 传入解释函数。
+
+
+五、目标领域模型
+================
+
+1. InvestigationState
+---------------------
+
+玩家调查状态的顶层容器，建议放在 game/investigation.py。
+
+字段建议：
+
+- examined_evidence_ids: set[str]
+- read_evidence_ids: set[str]
+- observations: dict[str, Observation]
+- source_statements: dict[str, SourceStatement]
+- known_claims: dict[str, KnownClaim]
+- hypotheses: dict[str, Hypothesis]
+- consultation_history: list[ConsultationResult]
+- comparison_history: list[ComparisonResult]
+- known_languages: dict[str, float]
+- schema_version: int
+
+现有 PlayerKnowledge 可以逐步演化为 InvestigationState，也可以暂时作为其中的 knowledge 子对象。第一阶段建议保留 PlayerKnowledge 类名，新增字段并保持旧存档兼容。
+
+2. Observation
+--------------
+
+表示玩家亲自观察到的内容，不包含历史解释。
+
+字段建议：
+
+- id
+- evidence_id
+- observation_type: material / color / surface / mark / form / script / damage
+- value
+- method: visual / handling / reading / comparison
+- clarity: 0.0~1.0
+- observed_at_location_id
+- observed_by: player
+
+例如：
+
+- “羊皮纸表面有水浸后扩散的墨迹。”
+- “石块上的凿痕方向较为一致。”
+- “正文和页边批注使用了不同笔迹。”
+
+Observation 不得写成“这是战争文书”或“它证明城市被攻陷”。
+
+3. Informant
+------------
+
+表示可以接受咨询的持久信息源。建议放在 simulation/informants.py，因为其身份、经历和知识应随世界一起生成和保存。
+
+字段建议：
+
+- id
+- person_id: Optional[str]
+- settlement_id
+- display_name
+- role: scholar / scribe / elder / merchant / artisan / healer / priest
+- expertise: dict[str, float]
+- language_proficiency: dict[str, float]
+- known_entry_ids: list[str]
+- institution_access: list[str]
+- birth_year / active_year_range
+- reliability_traits: dict[str, float]
+- biases: list[str]
+- alive / available
+
+为避免模拟所有普通居民，可以每个聚落生成少量持久 Informant：
+
+- 一名地方长者或口述者。
+- 一名商人或旅人。
+- 一名工匠。
+- 在文化条件允许时生成书记或学者。
+
+已有 Person 中符合角色的人直接关联 person_id。缺少具名人物时，可创建低成本 Informant，而不是把“villager”当作无状态万能接口。
+
+4. KnowledgeEntry
+-----------------
+
+表示 NPC 在调查开始前真正知道或接触过的内容。
+
+字段建议：
+
+- id
+- holder_id
+- entry_type: record_excerpt / oral_account / professional_rule / personal_memory
+- claim_ids: list[str]
+- topic_keys: list[str]
+- location_ids: list[str]
+- learned_year
+- source_root_id
+- transmission_depth
+- certainty
+- recognition_features: list[str]
+- access_conditions: list[str]
+
+KnowledgeEntry 在世界生成或世界最终化阶段建立，不能在玩家出示物品时根据 event_id 临时创造。
+
+例子：
+
+- 当地长者持有一则口述传统，对应某个 oral HistoricalRecord 的主张。
+- 书记接触过本地图书馆中的若干文书，但未必知道私人墓葬中的文书。
+- 金属工匠掌握“铆接形式、腐蚀、锻打痕迹”的专业规则，但不知道某场战争的结果。
+- 学者掌握书写年代和抄本判断方法，并可能读过馆藏目录。
+
+5. SourceStatement
+------------------
+
+表示一次调查动作产生的、玩家实际听到或读到的说法。
+
+字段建议：
+
+- id
+- speaker_type: player_reading / informant / community_record
+- speaker_id
+- evidence_ids
+- record_root_ids
+- statement_type: transcription / interpretation / oral_claim / comparison / limitation
+- claim_key: Optional[str]
+- statement_cn
+- basis_codes: list[str]
+- confidence
+- uncertainty_codes: list[str]
+- created_action_id
+
+必须区分：
+
+- “文书写道 X。”
+- “学者认为字形可能属于较晚时期。”
+- “居民听说过 X。”
+- “工匠只能确认它经过二次敲打。”
+
+这些句子不能被压缩成没有来源的统一事实。
+
+6. KnownClaim
+-------------
+
+保留现有 subject / predicate / object 语义键，但扩展来源关系：
+
+- supporting_statement_ids
+- contradicting_statement_ids
+- supporting_evidence_ids
+- source_record_roots
+- source_groups
+- confidence_components
+- unresolved_questions
+
+source_group 用于判断独立性。例如同一原件的三个抄本、同一口述传统的三名复述者都属于一个来源组。
+
+7. Hypothesis
+-------------
+
+玩家主动建立的解释，不是系统自动确认的事件。
+
+字段建议：
+
+- id
+- subject
+- predicate
+- proposed_object
+- proposed_time_range
+- title_cn
+- notes
+- supporting_statement_ids
+- contradicting_statement_ids
+- unresolved_statement_ids
+- alternative_hypothesis_ids
+- evaluation
+- status: draft / plausible / supported / disputed / abandoned
+- created_order
+
+假说示例：
+
+- “Blackburg 可能在第 40 年前后经历过一次未成功的围攻。”
+- “这份建城文书可能是后世依据更早材料制作的抄本。”
+- “两座城市所称的同一条商路，可能采用了不同名称。”
+
+系统只评价现有材料如何支持该假说，不回答它与 Truth 是否一致。
+
+
+六、NPC 专业与知识边界
+======================
+
+1. 专业领域
+-----------
+
+建议第一版提供以下 expertise key：
+
+- local_history：本地口述、旧地名、家族称呼。
+- paleography：字形、书写年代、抄写层次。
+- languages：文字识别和翻译。
+- administration：税册、法令、人口名册、印章格式。
+- warfare：兵器、工事、战损和军事文书格式。
+- trade：钱币、账簿、货物来源和商路习惯。
+- craftsmanship：材料、工具痕迹、制造和修补。
+- architecture：建筑层、砌筑方式和公共工程。
+- literature：作品体裁、异文、表演和传播。
+- natural_philosophy：理论论著、测量、试验和仪器。
+- medicine / agronomy / astronomy：对应专业文书。
+
+2. 角色基础能力
+---------------
+
+学者：paleography、languages、literature 或 natural_philosophy 较高，但不自动精通兵器和本地传闻。
+
+书记：admin、paleography 较高，能识别文书格式和抄写层次。
+
+地方长者：local_history 较高，可能知道地名和口述版本，但年代精度较低。
+
+商人：trade、languages 和外地地名较高，历史因果判断较弱。
+
+工匠：craftsmanship 较高，可判断材料、修补和工具痕迹，不会自动识别用途。
+
+祭司：仪式文本、墓葬和本地传统较高，可能带有制度立场。
+
+医者等专业者：只对相应理论与器物提供高质量判断。
+
+3. 能力生成
+-----------
+
+能力值由角色、所在地文化/理论水平、年龄、机构和个人经历确定，再加入小幅确定性差异。
+
+示意公式：
+
+expertise = role_base
+          + settlement_knowledge_modifier
+          + institution_modifier
+          + experience_modifier
+          + stable_person_variation
+
+所有变化使用 seed + informant_id + domain 的稳定哈希，不调用无上下文的全局随机数。
+
+4. NPC 不知道什么
+-----------------
+
+- 没接触过的密藏文书内容。
+- 自己出生前的事件，除非通过记录或口述获得。
+- 外地发生的事件，除非有旅行、贸易或传播来源。
+- Evidence.event_id 所指向的真实事件。
+- 记录中被 omitted_facts 删除的内容。
+- 已损毁载体中未保留下来的 claim。
+- 玩家没有展示、朗读或描述给他的材料。
+
+
+七、证物出示流程
+================
+
+一次 consultation 应由 game/consultation.py 中的 ConsultationEngine 完成。
+
+输入：
+
+- EvidencePublicView
+- 玩家已有的 Observation 列表
+- 可选的 DocumentReadingView
+- InformantPublicProfile
+- 该 Informant 的 KnowledgeEntry 列表
+- 玩家提出的问题或关注领域
+- 当前地点与访问条件
+
+禁止输入：
+
+- HistoricalEvent
+- World.events
+- event.details
+- event.title
+- 用于寻找“正确口述”的 source_event_ids
+
+处理阶段：
+
+1. 访问检查
+
+- 玩家是否检查过证物。
+- 证物是否在玩家可访问的位置或持有状态。
+- NPC 是否在场、存活且愿意交谈。
+- 脆弱证物是否允许搬动或展开。
+
+2. 可观察信息构建
+
+- 只暴露 physical_features、state、material 和玩家已发现的 Observation。
+- 文书仅在 NPC 懂得语言且可读时暴露可见 passages。
+
+3. 专业匹配
+
+- 根据 evidence_type、subtype 的外观类别和问题选择相关领域。
+- subtype 只能用于系统路由，不能直接转成 NPC 结论。
+- 专业不足时返回局限说明，而不是随机猜测。
+
+4. 知识匹配
+
+- 用可观察特征、可读关键词、地点、文书格式和玩家问题匹配 KnowledgeEntry。
+- recognition_features 必须达到阈值才能联想到具体口述或记录。
+- 只因同处一地不能自动关联。
+
+5. 产生解释
+
+输出可以包含零到多条 SourceStatement：
+
+- 观察确认。
+- 专业分类。
+- 年代范围估计。
+- 文字转录或翻译。
+- 与 NPC 已知记录/口述的有限联系。
+- 明确的能力边界和替代解释。
+
+6. 写入玩家知识
+
+- 保存完整 ConsultationResult。
+- 将每条 SourceStatement 写入调查日志。
+- 只有 statement 携带结构化 claim 时才更新 KnownClaim。
+- 专业解释不能凭空创建历史事件 claim。
+
+
+八、解释输出规则
+================
+
+1. 输出必须来源化
+-----------------
+
+推荐句式：
+
+- “Meren 根据笔画转折判断，这些页边字可能晚于正文。”
+- “这份文书可辨认的部分声称，城内曾征集石料。”
+- “当地长者复述的版本认为队伍来自北方，但没有给出年份。”
+- “工匠只能确认铆钉被重新固定过，无法判断为何修理。”
+
+禁止句式：
+
+- “这就是某场战争留下的兵器。”
+- “它证明 Blackburg 击退了 Falfall。”
+- “真实情况是……”
+- “系统确认该记录为伪造。”
+
+2. 判断等级
+-----------
+
+解释使用有限词汇表达强弱：
+
+- 看不出 / 无法判断
+- 可以观察到
+- 与……相符
+- 可能
+- 很可能
+- 多项独立材料共同支持
+
+“确定”只用于直接观察，如“纸面有虫孔”，不用在历史归因上。
+
+3. 非 LLM 模板
+--------------
+
+新增 narrative/interpretation_templates.py，根据以下关键词组合：
+
+- speaker role
+- statement type
+- basis code
+- certainty band
+- limitation code
+- object phrase
+
+模板只表达 ConsultationEngine 已经计算出的结构化结果。LLM 将来可以润色同一 DTO，但不得读取更多数据，也不得增加 claim。
+
+
+九、置信度与独立来源
+====================
+
+1. 置信度用途
+-------------
+
+内部保留 0.0~1.0 分数用于排序和规则判断；玩家界面主要显示“传闻、可能、可信、高度可信、存在争议”等级，并可查看原因。
+
+2. 置信度组成
+-------------
+
+建议按组件保存，而不是只保存总分：
+
+- carrier_quality：载体保存程度和可读性。
+- directness：直接观察、同时代记录、后世抄本或口述传承。
+- expertise_match：咨询者在相关领域的能力。
+- comprehension：语言和文本可辨识程度。
+- temporal_proximity：记录与所述年代的接近程度。
+- source_independence：独立来源组数量。
+- corroboration：不同证据类型是否互相支持。
+- contradiction：相同 topic 的冲突对象。
+- bias_penalty：已知立场和制度利益。
+- transmission_penalty：抄写或口述传播层级。
+
+3. 独立性规则
+-------------
+
+- 原件和它的所有抄本属于同一 source_root。
+- 同一口述传统的多位复述者属于同一 transmission root。
+- 同一机构根据同一底稿制作的石碑和文书不能自动算两个独立来源。
+- 一件器物和描述它的同时代账册可以算不同证据类型，但只有在没有共同信息来源时才算完全独立。
+- 两位专家查看同一物品不会增加历史主张的来源数，只会增加解释的可复核性。
+
+4. 冲突规则
+-----------
+
+现有 topic_key = subject + predicate 可继续使用，但需要增加关系类型：
+
+- exclusive：两个 object 不能同时为真，例如战争胜负。
+- compatible：两个 object 可以并存，例如不同损失描述。
+- temporal：可能描述不同年份，需先检查 time_range。
+- identity：可能是同一对象的异名，暂不直接判冲突。
+
+只有 exclusive 且时间明显重叠时才自动标记强冲突。
+
+
+十、玩家假说系统
+================
+
+1. 创建方式
+-----------
+
+玩家从已知 subject、predicate、object 和时间范围建立假说。第一版不支持任意自然语言解析，使用结构化参数，REPL 可提供：
+
+hypothesis create <subject> | <predicate> | <object> | <start>..<end>
+
+未来 UI 用表单、选项和拖放替代。
+
+2. 关联材料
+-----------
+
+玩家主动把 SourceStatement 或 Observation 标为：
+
+- support：支持。
+- contradict：反对。
+- context：相关但不能区分真假。
+- unresolved：需要进一步核查。
+
+系统可以建议关联候选，但不能未经玩家确认自动把所有同 topic 材料算作支持。
+
+3. 评价结果
+-----------
+
+HypothesisEvaluation 返回：
+
+- status
+- support_score
+- contradiction_score
+- independent_source_count
+- evidence_type_count
+- strongest_support_ids
+- strongest_contradiction_ids
+- missing_checks
+- explanation_codes
+
+示例缺口：
+
+- “目前只有同一底稿的抄本。”
+- “尚无同时代物证。”
+- “两份说法的年代范围没有重叠。”
+- “关键文字残缺，无法区分进攻方和防守方。”
+- “需要懂得旧文字的独立读者复核。”
+
+4. 多个竞争假说
+-----------------
+
+同一 topic 可以保留多个 Hypothesis。某个假说获得支持不会删除其他假说。只有玩家主动 abandoned，或者材料使其进入 disputed 状态。
+
+
+十一、代码结构建议
+==================
+
+新增模块：
+
+simulation/informants.py
+  Informant、KnowledgeEntry、InformantGenerator，以及世界生成阶段的知识分配。
+
+game/investigation.py
+  InvestigationState、Observation、SourceStatement、ConsultationResult、ComparisonResult。
+
+game/consultation.py
+  ConsultationEngine、公开 DTO 构建、能力匹配、知识匹配和结构化解释。
+
+game/hypotheses.py
+  Hypothesis、HypothesisEvaluation、独立来源和冲突计算。
+
+narrative/interpretation_templates.py
+  ConsultationResult 到中文文本的确定性模板。
+
+修改模块：
+
+simulation/world.py
+  增加 informants 和 knowledge_entries 的生成、序列化与查询；不得把它们与玩家状态混存。
+
+simulation/person.py
+  只增加必要的经历/教育引用，不在此处实现咨询规则。
+
+game/knowledge.py
+  保留 KnownClaim 兼容层，增加 statement 来源、置信度组件和更准确的冲突关系。
+
+game/repl.py
+  cmd_present 只负责解析输入、调用 ConsultationEngine 和渲染结果；删除其中的专业判断和真相关联逻辑。
+
+viewer/data.py 与 viewer/static/*
+  后续仅增加调查调试数据与操作面板，不承担规则计算。
+
+
+十二、序列化与确定性
+====================
+
+1. 世界存档
+-----------
+
+World.to_dict 增加：
+
+- informants
+- knowledge_entries
+
+旧存档加载时，以 world.seed、现有人物、记录和地点确定性迁移生成；迁移结果必须稳定。
+
+2. 玩家存档
+-----------
+
+InvestigationState 单独序列化，不写入 World。这样同一世界可以有多个调查进度，也避免玩家知识污染模拟真相。
+
+3. ID 规则
+----------
+
+- informant_0001
+- knowledge_entry_000001
+- observation_000001
+- statement_000001
+- consultation_000001
+- hypothesis_000001
+
+计数器随各自容器序列化。加载旧存档时从现有最大 ID 恢复。
+
+4. 确定性要求
+-------------
+
+- 所有候选集合先按稳定 ID 排序。
+- 随机差异使用 seed、实体 ID、动作类型和版本号的哈希。
+- 不使用 Python hash()。
+- 相同行动重复执行默认返回同一核心判断，不通过反复点击刷出新结论。
+- 如果 NPC 的知识或证物状态没有变化，重复咨询只记录“已复核”，不重复增加置信度。
+
+
+十三、调试入口与未来 UI 契约
+============================
+
+1. REPL 最小命令
+----------------
+
+保留并扩展：
+
+- examine <evidence>
+- read <evidence>
+- present <evidence> to <informant>
+- ask <informant> about <topic>
+- compare <evidence_a> with <evidence_b>
+- journal observations
+- journal statements
+- journal claims
+- hypothesis create/list/show/link/evaluate
+
+REPL 输出是测试工具，不追求最终交互体验。
+
+2. 世界查看器调试面板
+---------------------
+
+在底层稳定后增加，不作为第一实施步骤。面板应允许：
+
+- 选择聚落和当地 Informant。
+- 选择一件已标记为“玩家发现”的证物。
+- 模拟 examine/read/present。
+- 查看 ConsultationResult 的结构化字段。
+- 查看 NPC 为何知道或不知道某事。
+- 查看玩家知识图谱，但默认隐藏 Truth。
+- 使用单独的开发开关显示真相对照，防止普通视图泄漏。
+
+3. 正式 UI 所需稳定接口
+-----------------------
+
+正式 UI 只需依赖以下服务接口：
+
+- list_available_informants(location_id)
+- examine_evidence(evidence_id)
+- read_evidence(evidence_id, reader_id)
+- consult(evidence_id, informant_id, question)
+- compare(evidence_ids, method)
+- create_hypothesis(payload)
+- link_statement(hypothesis_id, statement_id, relation)
+- evaluate_hypothesis(hypothesis_id)
+- get_journal_view(filters)
+
+接口返回 DTO，不返回可变领域对象。
+
+
+十四、测试方案
+==============
+
+1. 信息边界测试
+---------------
+
+- ConsultationEngine 的公共函数签名不接受 HistoricalEvent。
+- 输出不得包含未出现在公开输入中的 event title、outcome 或 participants。
+- 无 KnowledgeEntry 的居民不能通过 source_event_ids 认出证物。
+- 证物检查不能自动增加历史 claim。
+- 文书阅读只能学习 retained_claim_ids 中仍被载体保存的 claim。
+
+2. NPC 能力测试
+---------------
+
+- 工匠能识别制造痕迹，不能自动翻译陌生文字。
+- 书记能判断制式和抄写层次，但不自动知道战争结果。
+- 地方长者只复述自己持有的口述条目。
+- 学者只在专业匹配时提供高质量判断。
+- 出生晚于事件的人若无传播来源，不能声称亲历。
+- 外地 NPC 若无旅行或记录来源，不知道本地口述。
+
+3. 来源独立性测试
+-----------------
+
+- 原件加三个抄本仍计为一个记录根源。
+- 同一物品交给两个专家不增加历史来源数。
+- 物证、独立账册和独立口述可以形成三个来源组。
+- 同一机构的派生记录按 source lineage 合并。
+
+4. 冲突与假说测试
+-----------------
+
+- 同一战争在重叠年代出现相反胜负时标记强冲突。
+- 不同年代的同主题记录不自动冲突。
+- 支持和反证都保留，不因后加入材料覆盖旧材料。
+- 假说评分只读取玩家已获得的 statement。
+- 假说与 Truth 一致与否不会影响评分。
+
+5. 确定性与序列化测试
+---------------------
+
+- 相同 seed 生成完全相同的 Informant 和 KnowledgeEntry。
+- 相同输入产生相同 ConsultationResult。
+- 世界和调查状态分别往返序列化后结果不变。
+- 旧存档迁移结果稳定。
+- 重复咨询不能无限提高置信度。
+
+6. 端到端案例
+-------------
+
+至少建立一个固定 seed 的验收故事：
+
+1. 玩家在聚落 A 检查一件带修补痕迹的金属器物。
+2. 工匠只判断其制造与修补特征，不给出历史归属。
+3. 玩家找到一份残缺文书，亲自只能读出部分主张。
+4. 书记识别出正文和页边字迹可能不同时期。
+5. 当地长者复述一则与某些地名特征相符、但胜负不同的口述。
+6. 玩家在聚落 B 找到独立来源的记录。
+7. 玩家建立两个竞争假说并关联材料。
+8. 系统显示一个假说“较受支持但仍有冲突”，另一个“仅有单一来源”。
+9. 调试真相可以与两个假说都不完全一致，且不影响调查流程。
+
+
+十五、分阶段实施计划
+====================
+
+Phase A：抽离现有出示逻辑
+------------------------
+
+目标：保持当前可玩行为，同时建立 UI 无关的服务层。
+
+- 新建 InvestigationState、SourceStatement 和 ConsultationResult。
+- 新建 ConsultationEngine。
+- 将 cmd_present 中的判断迁出 REPL。
+- 建立 EvidencePublicView，阻止运行时读取 HistoricalEvent。
+- 删除通过 source_event_ids 即时匹配口述的逻辑。
+- 为现有 scholar/villager 行为增加回归测试。
+
+完成标准：REPL 只做输入解析和结果打印；咨询引擎测试可以不实例化 GameREPL。
+
+Phase B：持久 NPC 与知识持有
+---------------------------
+
+- 新增 Informant 和 KnowledgeEntry。
+- 每个聚落生成基础咨询者。
+- 根据角色、年龄、地点、机构和传播链分配知识。
+- 支持学者、书记、长者、商人和工匠五类第一版角色。
+- 序列化世界中的 Informant 知识状态。
+
+完成标准：同一证物向不同 NPC 出示会得到可解释的不同结果；没有知识来源的 NPC 会明确表示不知道。
+
+Phase C：调查日志与可靠性
+-------------------------
+
+- Observation、SourceStatement 和 ConsultationHistory 完整落盘。
+- KnownClaim 改用 statement 来源图。
+- 引入 source_group 和置信度组件。
+- 修正冲突规则和抄本独立性。
+- journal 能按观察、原文、他人说法和综合主张分类查看。
+
+完成标准：任一 KnownClaim 都能回溯到具体调查动作，置信度变化有可读原因。
+
+Phase D：玩家假说
+-----------------
+
+- 实现 Hypothesis 和 HypothesisEvaluation。
+- 支持手动关联支持、反证和背景材料。
+- 生成缺失检查建议。
+- 支持同主题竞争假说。
+
+完成标准：玩家可以在不接触 Truth 的情况下完成一个包含支持、冲突和未决问题的调查结论。
+
+Phase E：查看器调试面板
+-----------------------
+
+- 增加仅供开发的调查面板。
+- 展示 NPC 专业、已知条目、咨询结果和玩家知识。
+- Truth 对照必须由显式 debug 开关启用并有明显隔离。
+- 用浏览器对桌面和移动尺寸进行交互验收。
+
+完成标准：无需进入 REPL 即可复现端到端调查案例，并能检查每个判断的数据来源。
+
+
+十六、推荐的实际开发顺序
+========================
+
+第一批代码只实施 Phase A，不立即加入完整假说系统。
+
+建议具体顺序：
+
+1. 定义 EvidencePublicView、SourceStatement、ConsultationResult。
+2. 为现有 scholar 和 villager 行为写服务层测试。
+3. 把 scholar 的物理判断、阅读和 claim 学习迁到 ConsultationEngine。
+4. 用临时 LocalCommunityProfile 替代无状态 villager。
+5. 删除 REPL 对 source_event_ids 的调查时关联。
+6. 让 GameREPL 调用新服务并保持现有命令可用。
+7. 完整测试真相隔离、确定性和序列化。
+8. 再进入 Phase B 的持久 Informant 生成。
+
+这样可以先修正最重要的架构边界，又不会一次引入过多新系统。
+
+
+十七、最终验收标准
+==================
+
+调查闭环底层系统达到可交付状态时，必须同时满足：
+
+- 玩家不查看调试真相也能完成一次多来源调查。
+- 物品描述中没有结论性历史归因。
+- NPC 的每条说法都能解释“他为什么知道”。
+- NPC 不会利用 event_id 或 source_event_ids 获得魔法般的正确关联。
+- 不同职业对同一证物提供不同且专业匹配的有限信息。
+- 抄本和重复转述不会被误算为多个独立来源。
+- 玩家可以保存矛盾材料和多个竞争假说。
+- 假说评价只依据玩家实际取得的信息。
+- 全系统在禁用 LLM 时功能完整。
+- 相同 seed 和相同行动序列结果完全一致。
+- 世界存档和玩家调查存档彼此独立并能稳定恢复。
+- REPL、调试查看器和未来正式 UI 共用同一个调查服务层。
+
+
+十八、暂缓事项
+==============
+
+以下能力已经预留接口，但应在调查闭环稳定后再加入：
+
+- 多语言学习、译文差异和错误翻译。
+- NPC 好感、费用、说服、拒绝和欺骗。
+- 赝品制作、鉴伪实验和实验室工具。
+- 玩家技能成长。
+- 证物携带容量、借阅许可和盗窃。
+- 自由文本问题解析。
+- LLM 风格化对话。
+- 正式游戏 UI。
+
+这些功能都不应改变本方案最核心的边界：模拟器保存真相，记录提出主张，证物承载信息，NPC 只解释自己能够接触和理解的部分，玩家负责形成历史结论。
