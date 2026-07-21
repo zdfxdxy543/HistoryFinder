@@ -6,11 +6,15 @@ import {
   ArrowUp,
   BookOpen,
   Boxes,
+  Clock3,
   FileText,
   Footprints,
+  Globe2,
   Info,
+  Hourglass,
   LoaderCircle,
   MessageSquareText,
+  MapPinned,
   RefreshCw,
   Scale,
   Search,
@@ -19,7 +23,9 @@ import {
 } from "lucide-react";
 import { performAction, startSession } from "./api";
 import GameCanvas from "./GameCanvas";
-import type { ActionResult, Journal, MapEntity, PlayerState } from "./types";
+import LocalMiniMap from "./LocalMiniMap";
+import WorldMapView from "./WorldMapView";
+import type { ActionResult, Journal, MapEntity, PlayerState, RuntimeState } from "./types";
 
 const TYPE_LABELS: Record<string, string> = {
   document: "文书",
@@ -50,6 +56,7 @@ const BIOME_LABELS: Record<string, string> = {
 
 type DockTab = "inspect" | "people" | "journal";
 type JournalTab = "observations" | "texts" | "statements" | "claims" | "conflicts";
+type ViewMode = "world" | "local";
 
 function value(item: Record<string, unknown>, key: string) {
   return String(item[key] ?? "");
@@ -65,6 +72,7 @@ export default function App() {
   const [years, setYears] = useState(30);
   const [sessionId, setSessionId] = useState("");
   const [state, setState] = useState<PlayerState | null>(null);
+  const [runtime, setRuntime] = useState<RuntimeState | null>(null);
   const [journal, setJournal] = useState<Journal | null>(null);
   const [selected, setSelected] = useState<MapEntity | null>(null);
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
@@ -75,6 +83,7 @@ export default function App() {
   const [dockTab, setDockTab] = useState<DockTab>("inspect");
   const [journalTab, setJournalTab] = useState<JournalTab>("observations");
   const [detail, setDetail] = useState<ActionResult | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("local");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -87,6 +96,7 @@ export default function App() {
       const response = await startSession(seed, years);
       setSessionId(response.session_id);
       setState(response.state);
+      setRuntime(response.state.runtime);
       setJournal(response.state.journal);
       setSelected(null);
       setActiveEvidenceId(null);
@@ -95,6 +105,7 @@ export default function App() {
       setCompareIds([]);
       setDetail(null);
       setDockTab("inspect");
+      setViewMode("local");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "无法创建世界");
     } finally {
@@ -116,7 +127,20 @@ export default function App() {
       try {
         const result = await performAction(sessionId, payload);
         if (result.journal) setJournal(result.journal);
-        setDetail(result);
+        if (result.runtime) setRuntime(result.runtime);
+        if (result.local_map) {
+          setState((current) => current ? {
+            ...current,
+            local_map: result.local_map!,
+          } : current);
+          setSelected((current) => {
+            if (!current) return current;
+            return result.local_map!.entities.find((item) => item.id === current.id)
+              ?? result.local_map!.discovered_evidence.find((item) => item.id === current.id)
+              ?? null;
+          });
+        }
+        if (!["wait", "journal"].includes(String(payload.action))) setDetail(result);
         if (payload.action === "examine") {
           const id = String(payload.evidence_id);
           setExaminedIds((current) => new Set(current).add(id));
@@ -136,31 +160,81 @@ export default function App() {
     [sessionId],
   );
 
+  const movePlayer = useCallback(async (dx: number, dy: number) => {
+    if (!sessionId) return null;
+    try {
+      const result = await performAction(sessionId, { action: "move", dx, dy });
+      if (result.runtime) setRuntime(result.runtime);
+      return result.runtime ?? null;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法移动");
+      return null;
+    }
+  }, [sessionId]);
+
+  const travelTo = useCallback(async (destinationId: string) => {
+    if (!sessionId) return;
+    setBusy(true);
+    setNotice("");
+    try {
+      const result = await performAction(sessionId, {
+        action: "travel",
+        destination_id: destinationId,
+      });
+      if (!result.location || !result.world_map) return;
+      setState((current) => current ? {
+        ...current,
+        ...result.location,
+        world_map: result.world_map!,
+      } : current);
+      setRuntime(result.location.runtime);
+      setSelected(null);
+      setActiveEvidenceId(null);
+      setNearbyIds([]);
+      setCompareIds([]);
+      setDetail(null);
+      setDockTab("inspect");
+      setViewMode("local");
+      setNotice(`已抵达${result.destination?.name ?? "目的地"}。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "旅行失败");
+    } finally {
+      setBusy(false);
+    }
+  }, [sessionId]);
+
   const onSelect = useCallback((entity: MapEntity) => {
     setSelected(entity);
-    setDockTab(entity.kind === "evidence" ? "inspect" : "people");
+    setDockTab(["evidence", "container"].includes(entity.kind) ? "inspect" : "people");
     if (entity.kind === "evidence") setActiveEvidenceId(entity.id);
   }, []);
 
   const onInteract = useCallback(
     (entity: MapEntity | null) => {
       if (!entity) {
-        setNotice("附近没有可以互动的对象。靠近证物或人物后再试。 ");
+        setNotice("附近没有可以互动的对象。靠近调查地点或人物后再试。");
         return;
       }
       onSelect(entity);
-      if (entity.kind === "evidence" && !examinedIds.has(entity.id)) {
+      if (entity.kind === "container") {
+        void runAction({ action: "search_container", container_id: entity.id });
+      } else if (entity.kind === "evidence" && !examinedIds.has(entity.id)) {
         void runAction({ action: "examine", evidence_id: entity.id });
       }
     },
     [examinedIds, onSelect, runAction],
   );
 
-  const selectedIsNearby = selected ? nearbyIds.includes(selected.id) : false;
+  const selectedIsNearby = selected ? (
+    selected.kind === "evidence" && runtime
+      ? Math.abs(selected.x - runtime.player.x) + Math.abs(selected.y - runtime.player.y) <= 1
+      : nearbyIds.includes(selected.id)
+  ) : false;
   const selectedEvidence = selected?.kind === "evidence" ? selected : null;
-  const selectedPerson = selected && selected.kind !== "evidence" ? selected : null;
+  const selectedContainer = selected?.kind === "container" ? selected : null;
+  const selectedPerson = selected && ["informant", "resident"].includes(selected.kind) ? selected : null;
   const activeEvidence = useMemo(
-    () => state?.local_map.entities.find((item) => item.id === activeEvidenceId) ?? null,
+    () => state?.local_map.discovered_evidence.find((item) => item.id === activeEvidenceId) ?? null,
     [activeEvidenceId, state],
   );
 
@@ -206,13 +280,24 @@ export default function App() {
         </div>
         {state && (
           <div className="location-heading">
-            <strong>{state.settlement.name}</strong>
-            <span>
-              {BIOME_LABELS[state.settlement.biome] ?? state.settlement.biome} · 第 {state.world.current_year} 年
-            </span>
+            <nav className="view-switch" aria-label="地图层级">
+              <button className={viewMode === "world" ? "active" : ""} onClick={() => setViewMode("world")}>
+                <Globe2 size={14} /> 世界
+              </button>
+              <button className={viewMode === "local" ? "active" : ""} onClick={() => setViewMode("local")}>
+                <MapPinned size={14} /> 当地
+              </button>
+            </nav>
+            <span>{state.settlement.name} · {state.local_map.site_type === "ruin" ? "废墟" : BIOME_LABELS[state.settlement.biome] ?? state.settlement.biome}</span>
           </div>
         )}
         <div className="world-settings">
+          {runtime && (
+            <div className="clock-readout" title="本地时间">
+              <Clock3 size={17} />
+              <span><strong>{runtime.time_label}</strong><small>第 {runtime.day} 日 · {runtime.period_name}</small></span>
+            </div>
+          )}
           <label>
             种子
             <input value={seed} type="number" onChange={(event) => setSeed(Number(event.target.value))} />
@@ -224,19 +309,30 @@ export default function App() {
           <button className="icon-command" title="重新生成世界" onClick={() => void createWorld()} disabled={loading}>
             <RefreshCw size={18} />
           </button>
+          <button className="icon-command" title="等待 10 分钟" onClick={() => void runAction({ action: "wait", minutes: 10 })} disabled={loading || busy}>
+            <Hourglass size={18} />
+          </button>
         </div>
       </header>
 
+      {state && viewMode === "world" ? (
+        <WorldMapView map={state.world_map} busy={busy} onTravel={(id) => void travelTo(id)} />
+      ) : (
       <main className="workspace">
         <section className="scene-pane" aria-label="当前聚落">
-          {state && (
-            <GameCanvas
-              map={state.local_map}
-              selectedId={selected?.id ?? null}
-              onSelect={onSelect}
-              onNearby={setNearbyIds}
-              onInteract={onInteract}
-            />
+          {state && runtime && (
+            <>
+              <GameCanvas
+                map={state.local_map}
+                runtime={runtime}
+                selectedId={selected?.id ?? null}
+                onSelect={onSelect}
+                onNearby={setNearbyIds}
+                onInteract={onInteract}
+                onMove={movePlayer}
+              />
+              <LocalMiniMap map={state.local_map} runtime={runtime} />
+            </>
           )}
           <div className="scene-status">
             <Footprints size={15} />
@@ -245,7 +341,8 @@ export default function App() {
             <span>E / 空格互动</span>
           </div>
           <div className="map-key" aria-label="地图图例">
-            <span><i className="key-dot evidence" />证物</span>
+            <span><i className="key-dot storage" />存储设施</span>
+            <span><i className="key-dot evidence" />现场证据</span>
             <span><i className="key-dot person" />知情人</span>
             <span><i className="key-dot resident" />居民</span>
             <span><i className="key-dot player" />玩家</span>
@@ -276,28 +373,32 @@ export default function App() {
           <div className="dock-content">
             {dockTab === "inspect" && (
               <InspectPanel
-                selected={selectedEvidence}
+                selected={selectedEvidence ?? selectedContainer}
                 nearby={selectedIsNearby}
                 examined={selectedEvidence ? examinedIds.has(selectedEvidence.id) : false}
                 read={selectedEvidence ? readIds.has(selectedEvidence.id) : false}
                 compareIds={compareIds}
                 detail={detail}
                 busy={busy}
+                evidence={state?.local_map.discovered_evidence ?? []}
+                onSelect={onSelect}
+                onSearch={(id) => void runAction({ action: "search_container", container_id: id })}
                 onExamine={(id) => void runAction({ action: "examine", evidence_id: id })}
                 onRead={(id) => void runAction({ action: "read", evidence_id: id })}
                 onToggleCompare={addToCompare}
                 onCompare={() => void compare()}
                 onClearDetail={() => setDetail(null)}
-                entities={state?.local_map.entities ?? []}
+                entities={state?.local_map.discovered_evidence ?? []}
               />
             )}
             {dockTab === "people" && (
               <PeoplePanel
                 informants={state?.informants ?? []}
                 residents={state?.local_map.entities.filter((item) => item.kind === "resident") ?? []}
-                evidence={state?.local_map.entities.filter(
-                  (item) => item.kind === "evidence" && examinedIds.has(item.id),
+                evidence={state?.local_map.discovered_evidence.filter(
+                  (item) => examinedIds.has(item.id),
                 ) ?? []}
+                runtime={runtime}
                 selected={selectedPerson}
                 nearby={selectedIsNearby}
                 activeEvidence={activeEvidence}
@@ -329,6 +430,7 @@ export default function App() {
           </div>
         </aside>
       </main>
+      )}
 
       {notice && (
         <div className="notice" role="alert">
@@ -355,7 +457,10 @@ function InspectPanel(props: {
   compareIds: string[];
   detail: ActionResult | null;
   busy: boolean;
+  evidence: MapEntity[];
   entities: MapEntity[];
+  onSelect: (entity: MapEntity) => void;
+  onSearch: (id: string) => void;
   onExamine: (id: string) => void;
   onRead: (id: string) => void;
   onToggleCompare: (id: string) => void;
@@ -363,18 +468,31 @@ function InspectPanel(props: {
   onClearDetail: () => void;
 }) {
   const { selected, detail } = props;
+  const isContainer = selected?.kind === "container";
+  const visibleEvidence = isContainer
+    ? props.evidence.filter((item) => item.container_id === selected.id)
+    : props.evidence;
   return (
     <>
       <section className="panel-heading">
         <p className="eyebrow">现场调查</p>
-        <h2>{selected?.name ?? "选择一件证物"}</h2>
+        <h2>{selected?.name ?? "选择调查地点"}</h2>
         <p>
-          {selected
+          {isContainer
+            ? `${selected.role_name} · ${selected.condition}。${selected.description_cn}`
+            : selected
             ? `${TYPE_LABELS[selected.subtype] ?? selected.subtype} · ${MATERIAL_LABELS[selected.material] ?? selected.material} · ${selected.zone}`
-            : "在地图中靠近并选择证物，客观观察才会写入游记。"}
+            : "靠近地图上的存储地点进行搜索，找到的材料会进入调查目录。"}
         </p>
       </section>
-      {selected && (
+      {isContainer && (
+        <div className="command-row">
+          <button className="command-button primary" disabled={!props.nearby || props.busy} onClick={() => props.onSearch(selected.id)}>
+            <Search size={15} /> {selected.searched ? "重新搜索" : "搜索此处"}
+          </button>
+        </div>
+      )}
+      {selected?.kind === "evidence" && (
         <div className="command-row">
           <button className="command-button primary" disabled={!props.nearby || props.busy} onClick={() => props.onExamine(selected.id)}>
             <Search size={15} /> {props.examined ? "复查" : "检查"}
@@ -389,7 +507,36 @@ function InspectPanel(props: {
           </button>
         </div>
       )}
-      {selected && !props.nearby && <p className="proximity-note">走到相邻格后才能检查或阅读。</p>}
+      {selected && !props.nearby && (
+        <p className="proximity-note">
+          {isContainer ? "走到调查地点相邻格后才能搜索。" : "返回证物存放地点旁才能检查或阅读。"}
+        </p>
+      )}
+
+      <section className="discovered-catalog">
+        <div className="section-title">
+          <h3>{isContainer ? "此处已发现的材料" : "已发现证物"}</h3>
+          <span>{visibleEvidence.length}</span>
+        </div>
+        {visibleEvidence.length ? (
+          <div className="discovered-list">
+            {visibleEvidence.map((item) => (
+              <button
+                key={item.id}
+                className={selected?.id === item.id ? "discovered-row active" : "discovered-row"}
+                onClick={() => props.onSelect(item)}
+              >
+                <span><strong>{item.name}</strong><small>{TYPE_LABELS[item.subtype] ?? item.subtype} · {item.storage_position || item.zone}</small></span>
+                {props.examined && selected?.id === item.id && <span className="nearby-mark">已检查</span>}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="catalog-empty">
+            {isContainer && !selected.searched ? "这里尚未搜索。" : "尚未在这里发现可登记的实体证物。"}
+          </p>
+        )}
+      </section>
 
       {props.compareIds.length > 0 && (
         <section className="compare-strip">
@@ -416,6 +563,7 @@ function PeoplePanel(props: {
   informants: PlayerState["informants"];
   residents: MapEntity[];
   evidence: MapEntity[];
+  runtime: RuntimeState | null;
   selected: MapEntity | null;
   nearby: boolean;
   activeEvidence: MapEntity | null;
@@ -430,6 +578,9 @@ function PeoplePanel(props: {
   const selectedInformant = props.selected?.kind === "informant";
   const selectedResident = props.selected?.kind === "resident";
   const informantRole = props.informants.find((item) => item.id === props.selected?.id)?.role_name;
+  const selectedActivity = props.runtime?.npcs.find(
+    (item) => item.id === props.selected?.id,
+  )?.activity_name;
   return (
     <>
       <section className="panel-heading">
@@ -437,9 +588,9 @@ function PeoplePanel(props: {
         <h2>{props.selected?.name ?? "寻找可以请教的人"}</h2>
         <p>
           {selectedResident
-            ? `${props.selected?.role_name} · ${props.selected?.zone}。${props.selected?.description_cn}`
+            ? `${props.selected?.role_name} · ${selectedActivity ?? props.selected?.zone}。${props.selected?.description_cn}`
             : props.activeEvidence
-              ? `${informantRole ?? "知情人"} · 当前准备出示：${props.activeEvidence.name}`
+              ? `${informantRole ?? "知情人"} · ${selectedActivity ?? "在聚落中"} · 当前准备出示：${props.activeEvidence.name}`
               : "先检查一件证物，再走近合适的知情人。"}
         </p>
       </section>
@@ -467,10 +618,11 @@ function PeoplePanel(props: {
         <p className="people-section-label">可提供调查意见</p>
         {props.informants.map((person) => {
           const active = props.selected?.id === person.id;
+          const activity = props.runtime?.npcs.find((item) => item.id === person.id)?.activity_name;
           return (
             <button key={person.id} className={active ? "person-row active" : "person-row"} onClick={() => props.onSelect(person.id)}>
               <span className={`role-swatch role-${person.role}`} />
-              <span><strong>{person.name}</strong><small>{person.role_name}</small></span>
+              <span><strong>{person.name}</strong><small>{person.role_name} · {activity ?? "在聚落中"}</small></span>
               {active && props.nearby && <span className="nearby-mark">邻近</span>}
             </button>
           );
@@ -478,10 +630,11 @@ function PeoplePanel(props: {
         <p className="people-section-label">普通居民</p>
         {props.residents.map((person) => {
           const active = props.selected?.id === person.id;
+          const activity = props.runtime?.npcs.find((item) => item.id === person.id)?.activity_name;
           return (
             <button key={person.id} className={active ? "person-row active" : "person-row"} onClick={() => props.onSelect(person.id)}>
               <span className="role-swatch ordinary" />
-              <span><strong>{person.name}</strong><small>{person.role_name} · {person.zone}</small></span>
+              <span><strong>{person.name}</strong><small>{person.role_name} · {activity ?? person.zone}</small></span>
               {active && props.nearby && <span className="nearby-mark">邻近</span>}
             </button>
           );
@@ -533,6 +686,13 @@ function ActionDetail({ detail, onClose }: { detail: ActionResult | null; onClos
       {detail.description_cn && <p className="long-copy">{detail.description_cn}</p>}
       {detail.text_cn && <p className="long-copy reading-copy">{detail.text_cn}</p>}
       {detail.dialogue_cn && <blockquote>{detail.dialogue_cn}</blockquote>}
+      {detail.discovered_evidence && detail.action === "search_container" && (
+        <ul className="evidence-list">
+          {detail.discovered_evidence.map((item) => (
+            <li key={item.id}>{item.name}<small>{TYPE_LABELS[item.subtype] ?? item.subtype} · {item.storage_position || item.zone}</small></li>
+          ))}
+        </ul>
+      )}
       {detail.observations && (
         <ul className="evidence-list">
           {detail.observations.map((item, index) => <li key={index}>{value(item, "description_cn")}</li>)}

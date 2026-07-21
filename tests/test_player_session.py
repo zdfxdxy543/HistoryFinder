@@ -1,8 +1,23 @@
 """Playable local-map session tests and truth-boundary checks."""
 
+import json
+from collections import Counter, deque
+
 import pytest
 
 from game.player_session import PlayerActionError, PlayerSession
+from game.local_map import (
+    TILE_FARMLAND,
+    TILE_FOREST,
+    TILE_MARSH,
+    TILE_ROCK,
+    TILE_SAND,
+    TILE_TUNDRA,
+    LocalMapBuilder,
+    PLACEMENT_PROFILES,
+    build_evidence_targets,
+)
+from game.local_time import BREAK_PLACE_TYPES
 from simulation.world import World
 
 
@@ -18,7 +33,7 @@ FORBIDDEN_KEYS = {
 }
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def player_session():
     world = World(seed=415)
     world.generate(years=0)
@@ -35,6 +50,83 @@ def _all_keys(value):
             yield from _all_keys(item)
 
 
+def _reachable_positions(local_map):
+    width = local_map["width"]
+    height = local_map["height"]
+    blocking = set(local_map["blocking_tiles"])
+    blocking_entities = {
+        (item["x"], item["y"])
+        for item in local_map["entities"]
+        if item["kind"] in {"container", "evidence"}
+        and item.get("blocks_movement", True)
+    }
+    start = (local_map["player_start"]["x"], local_map["player_start"]["y"])
+    queue = deque([start])
+    reached = {start}
+    while queue:
+        x, y = queue.popleft()
+        for dx, dy in ((0, -1), (-1, 0), (1, 0), (0, 1)):
+            neighbor = (x + dx, y + dy)
+            nx, ny = neighbor
+            if neighbor in reached or not (0 <= nx < width and 0 <= ny < height):
+                continue
+            if (local_map["tiles"][ny * width + nx] in blocking
+                    or neighbor in blocking_entities):
+                continue
+            reached.add(neighbor)
+            queue.append(neighbor)
+    return reached
+
+
+def _stand_next_to(session, entity):
+    reached = _reachable_positions(session.local_map)
+    candidates = sorted(
+        position for position in reached
+        if abs(position[0] - entity["x"]) + abs(position[1] - entity["y"]) <= 1
+        and position != (entity["x"], entity["y"])
+    )
+    assert candidates, f"no reachable neighbor for {entity['id']}"
+    session.local_time.player = {"x": candidates[0][0], "y": candidates[0][1]}
+
+
+def _discover_all_physical_evidence(session):
+    for container in (
+            item for item in session.local_map["entities"]
+            if item["kind"] == "container"):
+        _stand_next_to(session, container)
+        session.search_container(container["id"])
+    for evidence in (
+            item for item in session.local_map["entities"]
+            if item["kind"] == "evidence"):
+        _stand_next_to(session, evidence)
+        session.examine(evidence["id"])
+    return list(session.local_map["discovered_evidence"])
+
+
+def _protected_door_cells(building):
+    left, top, right, bottom = building["bounds"]
+    door_x, door_y = building["door"]["x"], building["door"]["y"]
+    if door_y == top:
+        inward, sideways = (0, 1), (1, 0)
+    elif door_y == bottom:
+        inward, sideways = (0, -1), (1, 0)
+    elif door_x == left:
+        inward, sideways = (1, 0), (0, 1)
+    else:
+        inward, sideways = (-1, 0), (0, 1)
+    protected = {
+        (door_x, door_y),
+        (door_x - inward[0], door_y - inward[1]),
+    }
+    for depth in range(1, 4):
+        center = (door_x + inward[0] * depth, door_y + inward[1] * depth)
+        protected.add(center)
+        if depth <= 2:
+            protected.add((center[0] + sideways[0], center[1] + sideways[1]))
+            protected.add((center[0] - sideways[0], center[1] - sideways[1]))
+    return protected
+
+
 def test_bootstrap_is_player_safe_and_has_walkable_entities(player_session):
     payload = player_session.bootstrap()
     local_map = payload["local_map"]
@@ -45,13 +137,20 @@ def test_bootstrap_is_player_safe_and_has_walkable_entities(player_session):
     assert FORBIDDEN_KEYS.isdisjoint(_all_keys(payload))
     assert local_map["width"] * local_map["height"] == len(local_map["tiles"])
     assert local_map["entities"]
+    assert local_map["discovered_evidence"] == []
+    assert any(item["kind"] == "container" for item in local_map["entities"])
+    assert any(
+        item["kind"] == "evidence"
+        and item["placement_kind"] == "structural"
+        for item in local_map["entities"])
     for entity in local_map["entities"]:
         position = (entity["x"], entity["y"])
         assert position not in positions
         positions.add(position)
         tile = local_map["tiles"][
             entity["y"] * local_map["width"] + entity["x"]]
-        assert tile not in blocking
+        if entity["kind"] in {"informant", "resident"}:
+            assert tile not in blocking
 
 
 def test_local_map_contains_living_buildings_and_ordinary_residents(
@@ -74,6 +173,144 @@ def test_local_map_contains_living_buildings_and_ordinary_residents(
     assert informant_ids.isdisjoint(item["id"] for item in residents)
 
 
+def test_search_discovers_every_surviving_physical_item_at_location(
+        player_session):
+    first_evidence_id = next(
+        item.id for item in player_session.world.evidence.values()
+        if item.location_id == player_session.current_location_id
+        and item.state != "destroyed"
+        and item.evidence_type != "oral")
+    with pytest.raises(PlayerActionError, match="找不到"):
+        player_session.examine(first_evidence_id)
+
+    found = _discover_all_physical_evidence(player_session)
+    expected_ids = {
+        item.id for item in player_session.world.evidence.values()
+        if item.location_id == player_session.current_location_id
+        and item.state != "destroyed"
+        and item.evidence_type != "oral"
+    }
+
+    assert {item["id"] for item in found} == expected_ids
+    assert {
+        item["id"] for item in player_session.local_map["discovered_evidence"]
+    } == expected_ids
+    assert player_session.knowledge.discovered_evidence_ids == expected_ids
+    assert all(item["searched"] for item in player_session.local_map["entities"]
+               if item["kind"] == "container")
+    assert FORBIDDEN_KEYS.isdisjoint(_all_keys(found))
+
+
+def test_buried_items_are_found_but_destroyed_items_are_not():
+    world = World(seed=421)
+    world.generate(years=0)
+    location_id = next(iter(world.settlements))
+    physical = [
+        item for item in world.evidence.values()
+        if item.location_id == location_id and item.evidence_type != "oral"
+    ]
+    assert len(physical) >= 2
+    physical[0].state = "buried"
+    physical[1].state = "destroyed"
+    session = PlayerSession(world, settlement_id=location_id)
+
+    found = _discover_all_physical_evidence(session)
+    found_ids = {item["id"] for item in found}
+
+    assert physical[0].id in found_ids
+    assert physical[1].id not in found_ids
+    assert physical[1].container_id not in {
+        item["id"] for item in session.local_map["entities"]
+        if item["kind"] == "container"
+    } or any(
+        item.container_id == physical[1].container_id
+        and item.id != physical[1].id
+        and item.state != "destroyed"
+        and item.evidence_type != "oral"
+        for item in world.evidence.values()
+    )
+    assert physical[1].id not in session.knowledge.discovered_evidence_ids
+
+
+def test_all_world_locations_expose_targets_for_surviving_physical_evidence():
+    world = World(seed=422)
+    world.generate(years=30)
+    builder = LocalMapBuilder()
+
+    for settlement in world.settlements.values():
+        local_map = builder.build(world, settlement)
+        expected_evidence_ids = {
+            item.id for item in world.evidence.values()
+            if item.location_id == settlement.id
+            and item.state != "destroyed"
+            and item.evidence_type != "oral"
+        }
+        targets = build_evidence_targets(
+            world.evidence.values(), world.storage_sites, settlement.id)
+        for target in targets:
+            capacity = PLACEMENT_PROFILES[target["placement_kind"]][2]
+            assert len(target["evidence_ids"]) <= capacity
+        covered_evidence_ids = {
+            evidence_id for target in targets
+            for evidence_id in target["evidence_ids"]
+        }
+        actual_target_ids = {
+            item["id"] for item in local_map["entities"]
+            if item["kind"] in {"container", "evidence"}
+        }
+        assert covered_evidence_ids == expected_evidence_ids
+        assert actual_target_ids == {item["id"] for item in targets}
+        reached = _reachable_positions(local_map)
+        protected = set().union(*(
+            _protected_door_cells(building)
+            for building in local_map["buildings"]
+        ))
+        for target in (
+                item for item in local_map["entities"]
+                if item["kind"] in {"container", "evidence"}):
+            assert (target["x"], target["y"]) not in protected
+            assert any(
+                (target["x"] + dx, target["y"] + dy) in reached
+                for dx, dy in ((0, -1), (-1, 0), (1, 0), (0, 1))
+            )
+
+
+def test_documents_use_fixtures_and_in_situ_evidence_stays_on_map():
+    world = World(seed=423)
+    world.generate(years=30)
+    for settlement in world.settlements.values():
+        targets = build_evidence_targets(
+            world.evidence.values(), world.storage_sites, settlement.id)
+        target_by_evidence = {
+            evidence_id: target for target in targets
+            for evidence_id in target["evidence_ids"]
+        }
+        for evidence in world.evidence.values():
+            if (evidence.location_id != settlement.id
+                    or evidence.state == "destroyed"
+                    or evidence.evidence_type == "oral"):
+                continue
+            target = target_by_evidence[evidence.id]
+            if evidence.state == "buried":
+                assert target["placement_kind"] == "excavation"
+            elif evidence.evidence_type == "structure":
+                assert target["kind"] == "evidence"
+                assert target["placement_kind"] == "structural"
+            elif evidence.evidence_type == "environmental":
+                assert target["kind"] == "evidence"
+                assert target["placement_kind"] == "stratigraphic"
+            elif evidence.evidence_type == "document" and evidence.material == "stone":
+                assert target["placement_kind"] == "stone_display"
+            elif (evidence.evidence_type == "document"
+                  and world.storage_sites[evidence.container_id].site_type
+                  != "field_site"):
+                assert target["kind"] == "container"
+                assert target["placement_kind"] in {
+                    "bookshelf", "archive_cabinet", "scroll_chest",
+                    "ledger_shelf", "document_chest",
+                }
+
+
 def test_talking_to_resident_is_safe_and_does_not_create_claims(player_session):
     resident = next(
         item for item in player_session.local_map["entities"]
@@ -90,8 +327,9 @@ def test_talking_to_resident_is_safe_and_does_not_create_claims(player_session):
 
 
 def test_read_requires_examination(player_session):
+    _discover_all_physical_evidence(player_session)
     document_id = next(
-        item["id"] for item in player_session.local_map["entities"]
+        item["id"] for item in player_session.local_map["discovered_evidence"]
         if item["kind"] == "evidence" and item["subtype"] == "document")
 
     with pytest.raises(PlayerActionError, match="先检查"):
@@ -99,8 +337,9 @@ def test_read_requires_examination(player_session):
 
 
 def test_examine_read_and_consult_update_safe_journal(player_session):
+    _discover_all_physical_evidence(player_session)
     document_id = next(
-        item["id"] for item in player_session.local_map["entities"]
+        item["id"] for item in player_session.local_map["discovered_evidence"]
         if item["kind"] == "evidence" and item["subtype"] == "document")
     informant_id = next(
         item["id"] for item in player_session.local_map["entities"]
@@ -120,8 +359,9 @@ def test_examine_read_and_consult_update_safe_journal(player_session):
 
 
 def test_compare_two_examined_map_objects(player_session):
+    _discover_all_physical_evidence(player_session)
     evidence_ids = [
-        item["id"] for item in player_session.local_map["entities"]
+        item["id"] for item in player_session.local_map["discovered_evidence"]
         if item["kind"] == "evidence"][:2]
     assert len(evidence_ids) == 2
     for evidence_id in evidence_ids:
@@ -142,3 +382,251 @@ def test_local_map_is_deterministic():
 
     assert PlayerSession(first_world).local_map == PlayerSession(
         second_world).local_map
+
+
+def test_map_sizes_and_geographic_layouts_are_data_driven():
+    world = World(seed=42)
+    world.generate(years=0)
+    builder = LocalMapBuilder()
+    settlements = list(world.settlements.values())
+    profiles = [builder._profile(world, item) for item in settlements]
+    layouts = {item.layout_type for item in profiles}
+    landscapes = {item.landscape_type for item in profiles}
+
+    assert len(layouts) >= 3
+    assert "river" in layouts
+    assert layouts & {"harbor", "woodland", "terrace", "oasis", "frontier"}
+    assert len(landscapes) >= 3
+
+    maps = [builder.build(world, item) for item in settlements]
+    natural_tiles = {
+        TILE_SAND, TILE_FOREST, TILE_ROCK,
+        TILE_FARMLAND, TILE_TUNDRA, TILE_MARSH,
+    }
+    signatures = {
+        tuple(Counter(local_map["tiles"])[tile] for tile in natural_tiles)
+        for local_map in maps
+    }
+    farmland_centers = []
+    for local_map in maps:
+        farmland = [
+            index for index, tile in enumerate(local_map["tiles"])
+            if tile == TILE_FARMLAND
+        ]
+        if farmland:
+            farmland_centers.append(sum(
+                index // local_map["width"] for index in farmland
+            ) / len(farmland) / local_map["height"])
+
+    assert len(signatures) >= 6
+    assert min(farmland_centers) < 0.40
+    assert max(farmland_centers) > 0.60
+
+    settlement = settlements[0]
+    dimensions = []
+    for size, population, peak in (
+            ("village", 100, 100),
+            ("village", 240, 240),
+            ("town", 600, 600),
+            ("city", 2200, 2200)):
+        settlement.size = size
+        settlement.population = population
+        settlement.peak_population = peak
+        profile = builder._profile(world, settlement)
+        dimensions.append((profile.width, profile.height))
+
+    assert dimensions == [(80, 56), (96, 64), (120, 80), (144, 96)]
+
+
+def test_entities_buildings_and_npc_destinations_are_reachable(player_session):
+    local_map = player_session.local_map
+    reached = _reachable_positions(local_map)
+    required = {
+        "hall", "market", "archive", "workshop", "inn",
+        "granary", "bakery", "well", "home",
+    }
+
+    assert required <= {
+        item["building_type"] for item in local_map["buildings"]}
+    for entity in local_map["entities"]:
+        if entity["kind"] in {"informant", "resident"}:
+            assert (entity["x"], entity["y"]) in reached
+        else:
+            assert any(
+                (entity["x"] + dx, entity["y"] + dy) in reached
+                for dx, dy in ((0, -1), (-1, 0), (1, 0), (0, 1)))
+    for building in local_map["buildings"]:
+        assert (building["door"]["x"], building["door"]["y"]) in reached
+    for npc in player_session.local_time._npcs.values():
+        assert npc["home"] in reached
+        assert npc["work"] in reached
+        assert npc["midday"] in reached
+
+
+def test_blocking_evidence_target_cannot_be_walked_through(player_session):
+    local_map = player_session.local_map
+    blocking_tiles = set(local_map["blocking_tiles"])
+    target = next(
+        item for item in local_map["entities"]
+        if item["kind"] in {"container", "evidence"}
+        and item["blocks_movement"]
+        and local_map["tiles"][
+            item["y"] * local_map["width"] + item["x"]
+        ] not in blocking_tiles
+    )
+    _stand_next_to(player_session, target)
+    before = player_session.local_time.snapshot()
+    dx = target["x"] - before["player"]["x"]
+    dy = target["y"] - before["player"]["y"]
+
+    result = player_session.move(dx, dy)
+
+    assert result["moved"] is False
+    assert result["runtime"]["player"] == before["player"]
+    assert result["runtime"]["turn"] == before["turn"]
+
+
+def test_player_steps_advance_clock_and_start_npc_commutes():
+    world = World(seed=417)
+    world.generate(years=0)
+    session = PlayerSession(world)
+    before = session.local_time.snapshot()
+
+    result = session.move(-1, 0)
+
+    assert result["moved"] is True
+    assert result["runtime"]["time_label"] == "06:56"
+    assert result["runtime"]["minute_of_day"] == before["minute_of_day"] + 1
+    assert result["runtime"]["turn"] == before["turn"] + 1
+
+
+def test_npc_homes_breaks_and_departures_are_distributed():
+    world = World(seed=415)
+    world.generate(years=0)
+    session = PlayerSession(world)
+    simulation = session.local_time
+
+    def building_at(position, building_types):
+        for building in session.local_map["buildings"]:
+            if building["building_type"] not in building_types:
+                continue
+            left, top, right, bottom = building["bounds"]
+            if left < position[0] < right and top < position[1] < bottom:
+                return building["id"]
+        return "outdoor"
+
+    homes = {
+        building_at(npc["home"], {"home"})
+        for npc in simulation._npcs.values()
+    }
+    break_places = {
+        building_at(npc["midday"], set(BREAK_PLACE_TYPES))
+        for npc in simulation._npcs.values()
+    }
+    doors = {
+        (item["door"]["x"], item["door"]["y"])
+        for item in session.local_map["buildings"]
+    }
+    offsets = {
+        npc["schedule_offset"] for npc in simulation._npcs.values()}
+
+    assert len(homes) >= 5
+    assert len(break_places) >= 4
+    assert len(offsets) >= 5
+    assert min(offsets) < 0 < max(offsets)
+    assert all(
+        npc[target] not in doors
+        for npc in simulation._npcs.values()
+        for target in ("home", "work", "midday")
+    )
+
+
+@pytest.mark.parametrize("seed", [415, 421, 422])
+def test_staggered_commute_reaches_work_without_door_deadlock(seed):
+    world = World(seed=seed)
+    world.generate(years=0)
+    session = PlayerSession(world)
+
+    runtime = session.local_time.advance(245)
+
+    assert runtime["time_label"] == "11:00"
+    assert all(
+        (npc["x"], npc["y"]) == npc["work"]
+        for npc in session.local_time._npcs.values()
+    )
+    positions = {
+        (npc["x"], npc["y"])
+        for npc in session.local_time._npcs.values()
+    }
+    assert len(positions) == len(session.local_time._npcs)
+
+
+def test_wait_and_investigation_actions_have_explicit_duration():
+    world = World(seed=418)
+    world.generate(years=0)
+    session = PlayerSession(world)
+    waited = session.wait(10)
+    _discover_all_physical_evidence(session)
+    evidence_id = next(
+        item["id"] for item in session.local_map["discovered_evidence"]
+        if item["kind"] == "evidence")
+    turn_before_examine = session.local_time.turn
+    examined = session.examine(evidence_id)
+
+    assert waited["runtime"]["turn"] == 10
+    assert examined["elapsed_minutes"] == 15
+    assert examined["runtime"]["turn"] == turn_before_examine + 15
+    positions = {
+        (item["x"], item["y"]) for item in examined["runtime"]["npcs"]}
+    assert len(positions) == len(examined["runtime"]["npcs"])
+
+
+def test_world_map_travel_loads_and_reuses_local_maps():
+    world = World(seed=419)
+    world.generate(years=0)
+    session = PlayerSession(world)
+    assert json.dumps(session.bootstrap(), ensure_ascii=False)
+    origin_id = session.current_location_id
+    origin_map = session.local_map
+    destination_id = next(
+        item.id for item in world.settlements.values()
+        if item.id != origin_id)
+
+    traveled = session.travel(destination_id)
+
+    assert traveled["action"] == "travel"
+    assert traveled["elapsed_minutes"] >= 60
+    assert traveled["location"]["settlement"]["id"] == destination_id
+    assert traveled["world_map"]["current_location_id"] == destination_id
+    assert FORBIDDEN_KEYS.isdisjoint(_all_keys(traveled))
+
+    session.travel(origin_id)
+    assert session.local_map is origin_map
+
+
+def test_destroyed_settlement_loads_as_walkable_ruin_with_search_sites():
+    world = World(seed=420)
+    world.generate(years=0)
+    session = PlayerSession(world)
+    ruin = next(
+        item for item in world.settlements.values()
+        if item.id != session.current_location_id)
+    ruin.alive = False
+    ruin.destroyed_year = world.current_year
+
+    traveled = session.travel(ruin.id)
+    local_map = traveled["location"]["local_map"]
+    blocking = set(local_map["blocking_tiles"])
+
+    assert local_map["site_type"] == "ruin"
+    assert traveled["destination"]["site_type"] == "ruin"
+    assert not [
+        item for item in local_map["entities"]
+        if item["kind"] in {"informant", "resident"}]
+    reached = _reachable_positions(local_map)
+    for target in (
+            item for item in local_map["entities"]
+            if item["kind"] in {"container", "evidence"}):
+        assert any(
+            (target["x"] + dx, target["y"] + dy) in reached
+            for dx, dy in ((0, -1), (-1, 0), (1, 0), (0, 1)))

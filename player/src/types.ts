@@ -1,6 +1,6 @@
 export type MapEntity = {
   id: string;
-  kind: "evidence" | "informant" | "resident";
+  kind: "evidence" | "container" | "informant" | "resident";
   x: number;
   y: number;
   name: string;
@@ -12,6 +12,15 @@ export type MapEntity = {
   zone: string;
   description_cn: string;
   dialogue_cn: string;
+  accessibility?: string;
+  condition?: string;
+  searched?: boolean;
+  discovered_count?: number;
+  container_id?: string;
+  storage_position?: string;
+  placement_kind?: string;
+  storage_site_id?: string;
+  blocks_movement?: boolean;
 };
 
 export type LocalBuilding = {
@@ -23,14 +32,64 @@ export type LocalBuilding = {
 };
 
 export type LocalMap = {
+  site_type: "settlement" | "ruin";
   width: number;
   height: number;
+  profile: {
+    layout_type: string;
+    layout_name: string;
+    water_axis: string;
+    water_side: string;
+    hub: { x: number; y: number };
+    entrances: string[];
+    landscape_type: string;
+    landscape_name: string;
+  };
   tiles: number[];
   blocking_tiles: number[];
   player_start: { x: number; y: number };
   entities: MapEntity[];
+  discovered_evidence: MapEntity[];
   buildings: LocalBuilding[];
-  zones: Array<{ id: string; name: string; bounds: number[] }>;
+  zones: Array<{ id: string; name: string; bounds: number[]; show_label?: boolean }>;
+};
+
+export type WorldLocation = {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  site_type: "settlement" | "ruin";
+  size: string;
+  biome: string;
+};
+
+export type WorldMapState = {
+  width: number;
+  height: number;
+  terrain: number[][];
+  biome_codes: Record<string, number>;
+  locations: WorldLocation[];
+  current_location_id: string;
+};
+
+export type NpcRuntime = {
+  id: string;
+  kind: "informant" | "resident";
+  x: number;
+  y: number;
+  activity: string;
+  activity_name: string;
+};
+
+export type RuntimeState = {
+  day: number;
+  minute_of_day: number;
+  time_label: string;
+  period_name: string;
+  turn: number;
+  player: { x: number; y: number };
+  npcs: NpcRuntime[];
 };
 
 export type Informant = {
@@ -63,6 +122,8 @@ export type PlayerState = {
     alive: boolean;
   };
   local_map: LocalMap;
+  runtime: RuntimeState;
+  world_map: WorldMapState;
   informants: Informant[];
   journal: Journal;
 };
@@ -81,4 +142,16 @@ export type ActionResult = {
   dialogue_cn?: string;
   comparison?: Record<string, unknown>;
   learned_claims?: Array<Record<string, unknown>>;
+  runtime?: RuntimeState;
+  moved?: boolean;
+  minutes?: number;
+  elapsed_minutes?: number;
+  location?: Pick<PlayerState, "settlement" | "local_map" | "runtime" | "informants">;
+  world_map?: WorldMapState;
+  origin?: { id: string; name: string };
+  destination?: { id: string; name: string; site_type: "settlement" | "ruin" };
+  container?: Record<string, unknown>;
+  discovered_evidence?: MapEntity[];
+  local_map?: LocalMap;
+  newly_discovered_count?: number;
 };

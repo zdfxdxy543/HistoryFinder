@@ -84,6 +84,16 @@ class PlayerSessionStore:
                 )
             if action == "talk":
                 return session.talk(str(payload.get("resident_id", "")))
+            if action == "search_container":
+                return session.search_container(
+                    str(payload.get("container_id", "")))
+            if action == "move":
+                return session.move(
+                    int(payload.get("dx", 0)), int(payload.get("dy", 0)))
+            if action == "wait":
+                return session.wait(int(payload.get("minutes", 10)))
+            if action == "travel":
+                return session.travel(str(payload.get("destination_id", "")))
             if action == "journal":
                 return {"action": "journal", "journal": session.journal_payload()}
             raise PlayerActionError("无法识别这个调查动作。")
