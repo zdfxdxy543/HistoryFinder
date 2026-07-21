@@ -14,6 +14,7 @@ from game.investigation import (
     ReadingPublicView,
     RecordPublicView,
     SourceStatement,
+    source_group_id,
     stable_investigation_id,
 )
 
@@ -93,6 +94,7 @@ class ConsultationEngine:
                     expertise_bonus=min(
                         0.30, self._relevant_expertise(
                             consultant, evidence) * 0.40),
+                    transmission_depth=matched.transmission_depth,
                 ))
                 return self._result(
                     consultation_id, consultant, evidence, statements, notes,
@@ -219,6 +221,7 @@ class ConsultationEngine:
                     condition=matched_held.certainty,
                     comprehension=max(0.20, matched_held.certainty * 0.75),
                     expertise_bonus=0.0,
+                    transmission_depth=matched_held.transmission_depth,
                 ))
             return self._result(
                 consultation_id, consultant, evidence, statements, notes,
@@ -256,6 +259,7 @@ class ConsultationEngine:
                 condition=matched.condition,
                 comprehension=0.55,
                 expertise_bonus=0.0,
+                transmission_depth=1,
             ))
         return self._result(
             consultation_id, consultant, evidence, statements, notes,
@@ -320,6 +324,7 @@ class ConsultationEngine:
                 condition=matched.certainty,
                 comprehension=max(0.20, matched.certainty * 0.70),
                 expertise_bonus=min(0.25, expertise * 0.35),
+                transmission_depth=matched.transmission_depth,
             ))
             return self._result(
                 consultation_id, consultant, evidence, statements, notes,
@@ -424,6 +429,7 @@ class ConsultationEngine:
             basis_codes: tuple[str, ...],
             uncertainty_codes: tuple[str, ...], condition: float,
             comprehension: float, expertise_bonus: float,
+            transmission_depth: int | None = None,
             ) -> SourceStatement:
         return SourceStatement(
             id=stable_investigation_id(
@@ -443,6 +449,16 @@ class ConsultationEngine:
             carrier_condition=condition,
             comprehension=comprehension,
             expertise_bonus=expertise_bonus,
+            source_group_id=(record.source_group_id
+                             or source_group_id(record.source_root_id)),
+            source_group_type=(
+                "oral_tradition"
+                if record.record_type == "oral_tradition"
+                else "record_lineage"),
+            transmission_depth=(
+                max(0, transmission_depth)
+                if transmission_depth is not None
+                else (1 if record.id != record.source_root_id else 0)),
         )
 
     @staticmethod

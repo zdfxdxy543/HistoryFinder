@@ -4,15 +4,19 @@ GameREPL：CLI 交互式探险 REPL。
 """
 
 import sys
+from game.comparison import ComparisonEngine
 from game.consultation import ConsultationEngine
 from game.investigation import (
     ConsultantView,
+    DocumentReading,
     EvidencePublicView,
     HeldKnowledgeView,
     ReadingPublicView,
     RecordPublicView,
+    build_reading_statements,
 )
 from game.knowledge import PlayerKnowledge
+from game.observation import build_evidence_observations
 from simulation.world import World
 from narrative.llm_interface import generate_narrative, is_llm_available, clear_cache
 from narrative.document_reader import read_document
@@ -31,11 +35,13 @@ class GameREPL:
         self.world = world
         self.current_location_id: str | None = None  # 当前所在 settlement_id
         self.visited_locations: set[str] = set()
-        self.examined_evidence: set[str] = set()
-        self.read_evidence: set[str] = set()
         self.known_events: set[str] = set()
         self.knowledge = PlayerKnowledge()
+        # Compatibility aliases while investigation state moves into knowledge.
+        self.examined_evidence = self.knowledge.examined_evidence_ids
+        self.read_evidence = self.knowledge.read_evidence_ids
         self._consultation_engine = ConsultationEngine()
+        self._comparison_engine = ComparisonEngine()
         # Language progression will extend this set in a later phase.
         self.known_languages: set[str] = {"common"}
 
@@ -71,6 +77,9 @@ class GameREPL:
             elif cmd in ("journal", "j"):
                 self.cmd_journal()
 
+            elif cmd.startswith("journal "):
+                self.cmd_journal(cmd[len("journal "):].strip())
+
             elif cmd.startswith("examine "):
                 target = cmd[len("examine "):].strip()
                 self.cmd_examine(target)
@@ -82,6 +91,10 @@ class GameREPL:
             elif cmd.startswith("present "):
                 request = cmd[len("present "):].strip()
                 self.cmd_present(request)
+
+            elif cmd.startswith("compare "):
+                request = cmd[len("compare "):].strip()
+                self.cmd_compare(request)
 
             elif cmd.startswith("travel to "):
                 dest = cmd[len("travel to "):].strip()
@@ -176,8 +189,9 @@ class GameREPL:
         print(f"\n--- 检查 {_evidence_display_name(evd)} ---")
         print(text)
 
-        self.examined_evidence.add(evd.id)
-        self.knowledge.discover_evidence(evd.id)
+        evidence_view = EvidencePublicView.from_evidence(evd)
+        observations = build_evidence_observations(evidence_view)
+        self.knowledge.record_observations(evd.id, observations)
 
 
     def cmd_read(self, target: str):
@@ -196,13 +210,19 @@ class GameREPL:
         result = read_document(evd, self.known_languages)
         print(f"\n--- 阅读 {_evidence_display_name(evd)} ---")
         print(result["text"])
+        reading = DocumentReading.from_result(
+            evd.id, self.current_location_id, result)
+        statements = ()
         if result["status"] == "readable":
-            self.read_evidence.add(evd.id)
             record = self.world.records.get(evd.source_record_id)
             if record is not None:
-                learned = self.knowledge.learn_from_record(
-                    record, evd, result.get("readability", 0.0))
-                self._print_learned_claims(learned)
+                evidence_view = EvidencePublicView.from_evidence(evd)
+                record_view = RecordPublicView.from_record_and_evidence(
+                    record, evd)
+                statements = build_reading_statements(
+                    evidence_view, reading, record_view)
+        learned = self.knowledge.record_reading(reading, statements)
+        self._print_learned_claims(learned)
 
 
     def cmd_present(self, request: str):
@@ -270,6 +290,65 @@ class GameREPL:
             self._print_learned_claims(learned, indent="  ")
         elif result.claim_statements:
             print("这次复核没有为游记增加新的独立说法。")
+
+
+    def cmd_compare(self, request: str):
+        """Compare two examined local evidence items."""
+        if " with " not in request:
+            print("用法：compare <证物A> with <证物B>")
+            return
+        first_target, second_target = request.split(" with ", 1)
+        first = self._resolve_local_evidence(first_target.strip())
+        if first is None:
+            return
+        second = self._resolve_local_evidence(second_target.strip())
+        if second is None:
+            return
+        if first.id == second.id:
+            print("请选择两件不同的证物进行比较。")
+            return
+        missing = [
+            item for item in (first, second)
+            if item.id not in self.examined_evidence]
+        if missing:
+            names = "、".join(_evidence_display_name(item) for item in missing)
+            print(f"需要先 examine {names}，留下可供比较的观察记录。")
+            return
+
+        first_observations = tuple(
+            item for item in self.knowledge.observations.values()
+            if item.evidence_id == first.id)
+        second_observations = tuple(
+            item for item in self.knowledge.observations.values()
+            if item.evidence_id == second.id)
+        result = self._comparison_engine.compare(
+            EvidencePublicView.from_evidence(first),
+            EvidencePublicView.from_evidence(second),
+            first_observations,
+            second_observations,
+            self._source_groups_for_evidence(first.id),
+            self._source_groups_for_evidence(second.id),
+        )
+        self.knowledge.record_comparison(result)
+
+        print(
+            f"\n--- 比较 {_evidence_display_name(first)} 与 "
+            f"{_evidence_display_name(second)} ---")
+        print("相同点：")
+        for item in result.similarities_cn or ("没有记录到明确的共同特征。",):
+            print(f"  {item}")
+        print("差异点：")
+        for item in result.differences_cn or ("没有记录到明确差异。",):
+            print(f"  {item}")
+        print("限制：")
+        for item in result.limitations_cn:
+            print(f"  {item}")
+
+
+    def _source_groups_for_evidence(self, evidence_id: str) -> tuple[str, ...]:
+        return tuple(sorted(
+            group.id for group in self.knowledge.source_groups.values()
+            if evidence_id in group.evidence_ids))
 
 
     def _record_public_view(self, evidence):
@@ -418,21 +497,158 @@ class GameREPL:
                 print(f"  {s.name} — 毁坏原因尚未查明 ({s.biome}){mark}")
 
 
-    def cmd_journal(self):
-        """显示游记笔记。"""
+    def cmd_journal(self, section: str | None = None):
+        """Display the investigation log, optionally filtered by category."""
+        aliases = {
+            "observations": "observations", "observation": "observations",
+            "texts": "texts", "text": "texts", "documents": "texts",
+            "statements": "statements", "statement": "statements",
+            "claims": "claims", "claim": "claims",
+            "conflicts": "conflicts", "conflict": "conflicts",
+            "comparisons": "comparisons", "comparison": "comparisons",
+        }
+        selected = aliases.get(section, section) if section else None
+        valid = {
+            "observations", "texts", "statements", "claims", "conflicts",
+            "comparisons"}
+        if selected is not None and selected not in valid:
+            print(
+                "可查看：observations / texts / statements / claims / "
+                "conflicts / comparisons")
+            return
+
         print(f"\n===== 探险家游记 =====")
         print(f"当前年份：{self.world.current_year}")
         print(f"探访过的地方：{len(self.visited_locations)} 处")
         print(f"检查过的证据：{len(self.examined_evidence)} 件")
         print(f"读过的文书：{len(self.read_evidence)} 份")
+        print(f"客观观察：{len(self.knowledge.observations)} 条")
+        print(f"有来源的说法：{len(self.knowledge.source_statements)} 条")
+        print(f"独立来源组：{len(self.knowledge.source_groups)} 组")
+        print(f"证物比较：{len(self.knowledge.comparisons)} 次")
         print(f"记录下来的历史主张：{len(self.knowledge.known_claims)} 条")
 
-        if self.knowledge.known_claims:
-            print(f"\n当前主张：")
+        sections = (selected,) if selected else (
+            "observations", "texts", "statements", "claims", "conflicts",
+            "comparisons")
+        if "observations" in sections:
+            print("\n--- 客观观察 ---")
+            observations = sorted(
+                self.knowledge.observations.values(),
+                key=lambda item: (item.evidence_id, item.id))
+            if not observations:
+                print("  尚无记录。")
+            for observation in observations:
+                print(
+                    f"  [{self._evidence_name(observation.evidence_id)}] "
+                    f"{observation.description_cn}"
+                    f"（清晰度 {observation.clarity:.0%}）")
+
+        if "texts" in sections:
+            print("\n--- 文书原文 ---")
+            readings = sorted(
+                self.knowledge.document_readings.values(),
+                key=lambda item: (item.evidence_id, item.id))
+            if not readings:
+                print("  尚无记录。")
+            for reading in readings:
+                name = self._evidence_name(reading.evidence_id)
+                if not reading.visible_passages:
+                    print(f"  [{name}] 未取得可辨原文（{reading.status}）。")
+                    continue
+                print(f"  [{name}] 语言 {reading.language_code}：")
+                for passage in reading.visible_passages:
+                    print(f"    “{passage}”")
+
+        if "statements" in sections:
+            print("\n--- 他人说法 ---")
+            statements = sorted(
+                (item for item in self.knowledge.source_statements.values()
+                 if item.speaker_type != "player_reading"),
+                key=lambda item: item.id)
+            if not statements:
+                print("  尚无记录。")
+            for statement in statements:
+                print(f"  {statement.statement_cn}")
+
+        if "claims" in sections:
+            print("\n--- 综合主张 ---")
+            if not self.knowledge.known_claims:
+                print("  尚无记录。")
             for claim in self.knowledge.sorted_claims():
                 conflict = "，存在冲突材料" \
                     if claim.contradicting_evidence_ids else ""
-                print(f"  [{claim.status}{conflict}] {claim.statement_cn}")
+                print(
+                    f"  [{claim.status}{conflict}，"
+                    f"{len(claim.source_groups)} 个独立来源组] "
+                    f"{claim.statement_cn}")
+                components = self._confidence_component_summary(claim)
+                if components:
+                    print(f"    置信度依据：{components}")
+
+        if "conflicts" in sections:
+            print("\n--- 未解决冲突 ---")
+            conflicts = sorted(
+                self.knowledge.conflicts.values(), key=lambda item: item.id)
+            if not conflicts:
+                print("  尚无记录。")
+            for conflict in conflicts:
+                first = self.knowledge.known_claims.get(
+                    conflict.first_claim_key)
+                second = self.knowledge.known_claims.get(
+                    conflict.second_claim_key)
+                first_text = (first.statement_cn if first is not None
+                              else conflict.first_claim_key)
+                second_text = (second.statement_cn if second is not None
+                               else conflict.second_claim_key)
+                print(
+                    f"  [第{conflict.overlap_range[0]}~"
+                    f"{conflict.overlap_range[1]}年] "
+                    f"{first_text} / {second_text}")
+                print(f"    {conflict.reason_cn}")
+
+        if "comparisons" in sections:
+            print("\n--- 证物比较 ---")
+            comparisons = sorted(
+                self.knowledge.comparisons.values(), key=lambda item: item.id)
+            if not comparisons:
+                print("  尚无记录。")
+            for comparison in comparisons:
+                first_id, second_id = comparison.evidence_ids
+                print(
+                    f"  {self._evidence_name(first_id)} / "
+                    f"{self._evidence_name(second_id)}："
+                    f"{len(comparison.similarities_cn)} 项相同，"
+                    f"{len(comparison.differences_cn)} 项不同，"
+                    f"来源关系 {comparison.source_group_relation}")
+
+
+    def _evidence_name(self, evidence_id: str) -> str:
+        evidence = self.world.evidence.get(evidence_id)
+        return (_evidence_display_name(evidence)
+                if evidence is not None else evidence_id)
+
+
+    @staticmethod
+    def _confidence_component_summary(claim) -> str:
+        labels = {
+            "carrier_quality": "载体质量",
+            "directness": "直接程度",
+            "expertise_match": "专业匹配",
+            "comprehension": "文字理解",
+            "temporal_proximity": "年代接近",
+            "source_independence": "来源独立",
+            "corroboration": "跨类型印证",
+            "contradiction": "互斥冲突",
+            "bias_penalty": "立场偏差",
+            "transmission_penalty": "传承损耗",
+        }
+        parts = []
+        for key, value in claim.confidence_components.items():
+            if abs(value) < 0.0005:
+                continue
+            parts.append(f"{labels.get(key, key)} {value:+.0%}")
+        return "，".join(parts)
 
 
     def cmd_events(self):
@@ -548,10 +764,12 @@ def print_help():
   read <编号/名字>    阅读已检查过的文书
   present <证物> to <咨询者>
                       可选 scholar/scribe/elder/villager/merchant/artisan 或姓名
+  compare <A> with <B> 比较两件已检查证物
   search <关键词>     在游记和已检查证物中搜索
 
 笔记：
-  journal / j         查看游记（已知事件和证据）
+  journal / j         分类查看调查日志
+  journal <分类>      observations/texts/statements/claims/conflicts/comparisons
   events / history    查看已确认的历史
 
 系统：

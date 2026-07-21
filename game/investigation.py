@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable
 
 
@@ -236,6 +236,156 @@ class EvidencePublicView:
 
 
 @dataclass(frozen=True)
+class Observation:
+    """One player-visible property, without historical interpretation."""
+
+    id: str
+    evidence_id: str
+    observation_type: str
+    value: str
+    description_cn: str
+    method: str
+    clarity: float
+    observed_at_location_id: str
+    observed_by: str = "player"
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "evidence_id": self.evidence_id,
+            "observation_type": self.observation_type,
+            "value": self.value,
+            "description_cn": self.description_cn,
+            "method": self.method,
+            "clarity": self.clarity,
+            "observed_at_location_id": self.observed_at_location_id,
+            "observed_by": self.observed_by,
+        }
+
+    @classmethod
+    def create(cls, evidence: EvidencePublicView, observation_type: str,
+               value: str, description_cn: str, method: str = "visual",
+               clarity: float | None = None) -> "Observation":
+        clarity = evidence.condition if clarity is None else clarity
+        return cls(
+            id=stable_investigation_id(
+                "observation", (
+                    evidence.id, observation_type, value, method,
+                    evidence.location_id,
+                )),
+            evidence_id=evidence.id,
+            observation_type=observation_type,
+            value=value,
+            description_cn=description_cn,
+            method=method,
+            clarity=max(0.0, min(1.0, clarity)),
+            observed_at_location_id=evidence.location_id,
+        )
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Observation":
+        return cls(
+            id=data["id"],
+            evidence_id=data.get("evidence_id", ""),
+            observation_type=data.get("observation_type", "unknown"),
+            value=data.get("value", "unknown"),
+            description_cn=data.get("description_cn", "观察内容不明。"),
+            method=data.get("method", "visual"),
+            clarity=float(data.get("clarity", 0.0)),
+            observed_at_location_id=data.get(
+                "observed_at_location_id", ""),
+            observed_by=data.get("observed_by", "player"),
+        )
+
+
+@dataclass(frozen=True)
+class DocumentReading:
+    """The exact text fragments exposed to the player by one read action."""
+
+    id: str
+    evidence_id: str
+    status: str
+    language_code: str
+    readability: float
+    visible_passages: tuple[str, ...]
+    read_at_location_id: str
+
+    @classmethod
+    def from_result(cls, evidence_id: str, location_id: str,
+                    result: dict) -> "DocumentReading":
+        passages = tuple(result.get("visible_passages", ()))
+        status = result.get("status", "no_text")
+        language = result.get("language_code", "unknown")
+        readability = float(result.get("readability", 0.0))
+        return cls(
+            id=stable_investigation_id(
+                "reading", (
+                    evidence_id, location_id, status, language,
+                    f"{readability:.6f}", *passages,
+                )),
+            evidence_id=evidence_id,
+            status=status,
+            language_code=language,
+            readability=max(0.0, min(1.0, readability)),
+            visible_passages=passages,
+            read_at_location_id=location_id,
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "evidence_id": self.evidence_id,
+            "status": self.status,
+            "language_code": self.language_code,
+            "readability": self.readability,
+            "visible_passages": list(self.visible_passages),
+            "read_at_location_id": self.read_at_location_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "DocumentReading":
+        return cls(
+            id=data["id"],
+            evidence_id=data.get("evidence_id", ""),
+            status=data.get("status", "no_text"),
+            language_code=data.get("language_code", "unknown"),
+            readability=float(data.get("readability", 0.0)),
+            visible_passages=tuple(data.get("visible_passages", ())),
+            read_at_location_id=data.get("read_at_location_id", ""),
+        )
+
+
+@dataclass
+class SourceGroup:
+    """One independent lineage shared by copies or oral transmissions."""
+
+    id: str
+    group_type: str
+    root_record_id: str
+    evidence_ids: list[str] = field(default_factory=list)
+    statement_ids: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "group_type": self.group_type,
+            "root_record_id": self.root_record_id,
+            "evidence_ids": list(self.evidence_ids),
+            "statement_ids": list(self.statement_ids),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SourceGroup":
+        return cls(
+            id=data["id"],
+            group_type=data.get("group_type", "record_lineage"),
+            root_record_id=data.get("root_record_id", ""),
+            evidence_ids=list(data.get("evidence_ids", ())),
+            statement_ids=list(data.get("statement_ids", ())),
+        )
+
+
+@dataclass(frozen=True)
 class RecordPublicView:
     """Carrier-retained record claims with all event links removed."""
 
@@ -246,6 +396,7 @@ class RecordPublicView:
     record_type: str
     carrier_subtype: str
     claims: tuple[ClaimView, ...]
+    source_group_id: str = ""
 
     @classmethod
     def from_record_and_evidence(cls, record, evidence) -> "RecordPublicView":
@@ -255,14 +406,16 @@ class RecordPublicView:
             for claim in record.claimed_facts
             if claim.id in retained
         )
+        root_id = record.copy_parent_id or record.id
         return cls(
             id=record.id,
-            source_root_id=record.copy_parent_id or record.id,
+            source_root_id=root_id,
             perspective=record.perspective,
             language_code=record.language_code,
             record_type=record.record_type,
             carrier_subtype=record.carrier_subtype,
             claims=claims,
+            source_group_id=source_group_id(root_id),
         )
 
     def to_dict(self) -> dict:
@@ -274,6 +427,7 @@ class RecordPublicView:
             "record_type": self.record_type,
             "carrier_subtype": self.carrier_subtype,
             "claims": [claim.to_dict() for claim in self.claims],
+            "source_group_id": self.source_group_id,
         }
 
 
@@ -426,6 +580,7 @@ class HeldKnowledgeView:
             record_type=record.record_type,
             carrier_subtype=record.carrier_subtype,
             claims=claims,
+            source_group_id=source_group_id(entry.source_root_id),
         )
         claim_domains = {
             domain
@@ -465,6 +620,9 @@ class SourceStatement:
     carrier_condition: float = 0.0
     comprehension: float = 0.0
     expertise_bonus: float = 0.0
+    source_group_id: str | None = None
+    source_group_type: str = "record_lineage"
+    transmission_depth: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -483,18 +641,22 @@ class SourceStatement:
             "carrier_condition": self.carrier_condition,
             "comprehension": self.comprehension,
             "expertise_bonus": self.expertise_bonus,
+            "source_group_id": self.source_group_id,
+            "source_group_type": self.source_group_type,
+            "transmission_depth": self.transmission_depth,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "SourceStatement":
         claim_data = data.get("claim")
+        root_id = data.get("source_record_root_id")
         return cls(
             id=data["id"],
             speaker_type=data.get("speaker_type", "unknown"),
             speaker_id=data.get("speaker_id", "unknown"),
             presented_evidence_id=data.get("presented_evidence_id", ""),
             source_evidence_id=data.get("source_evidence_id"),
-            source_record_root_id=data.get("source_record_root_id"),
+            source_record_root_id=root_id,
             statement_type=data.get("statement_type", "limitation"),
             statement_cn=data.get("statement_cn", ""),
             basis_codes=tuple(data.get("basis_codes", [])),
@@ -504,6 +666,12 @@ class SourceStatement:
             carrier_condition=float(data.get("carrier_condition", 0.0)),
             comprehension=float(data.get("comprehension", 0.0)),
             expertise_bonus=float(data.get("expertise_bonus", 0.0)),
+            source_group_id=data.get("source_group_id") or (
+                source_group_id(root_id) if root_id else None),
+            source_group_type=data.get(
+                "source_group_type", "record_lineage"),
+            transmission_depth=max(
+                0, int(data.get("transmission_depth", 0))),
         )
 
 
@@ -551,7 +719,133 @@ class ConsultationResult:
         )
 
 
+@dataclass(frozen=True)
+class ClaimConflict:
+    """A strong, unresolved conflict derived from player-owned claims."""
+
+    id: str
+    first_claim_key: str
+    second_claim_key: str
+    relation_type: str
+    strength: str
+    overlap_range: tuple[int, int]
+    first_statement_ids: tuple[str, ...] = ()
+    second_statement_ids: tuple[str, ...] = ()
+    reason_cn: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "first_claim_key": self.first_claim_key,
+            "second_claim_key": self.second_claim_key,
+            "relation_type": self.relation_type,
+            "strength": self.strength,
+            "overlap_range": list(self.overlap_range),
+            "first_statement_ids": list(self.first_statement_ids),
+            "second_statement_ids": list(self.second_statement_ids),
+            "reason_cn": self.reason_cn,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ClaimConflict":
+        overlap = data.get("overlap_range", [0, 0])
+        return cls(
+            id=data["id"],
+            first_claim_key=data.get("first_claim_key", ""),
+            second_claim_key=data.get("second_claim_key", ""),
+            relation_type=data.get("relation_type", "exclusive"),
+            strength=data.get("strength", "strong"),
+            overlap_range=(int(overlap[0]), int(overlap[1])),
+            first_statement_ids=tuple(data.get("first_statement_ids", ())),
+            second_statement_ids=tuple(data.get("second_statement_ids", ())),
+            reason_cn=data.get("reason_cn", ""),
+        )
+
+
+@dataclass(frozen=True)
+class ComparisonResult:
+    """A deterministic comparison of player-observable evidence properties."""
+
+    id: str
+    evidence_ids: tuple[str, str]
+    method: str
+    similarities_cn: tuple[str, ...] = ()
+    differences_cn: tuple[str, ...] = ()
+    limitations_cn: tuple[str, ...] = ()
+    source_group_relation: str = "unknown"
+    observation_ids: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "evidence_ids": list(self.evidence_ids),
+            "method": self.method,
+            "similarities_cn": list(self.similarities_cn),
+            "differences_cn": list(self.differences_cn),
+            "limitations_cn": list(self.limitations_cn),
+            "source_group_relation": self.source_group_relation,
+            "observation_ids": list(self.observation_ids),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ComparisonResult":
+        evidence_ids = data.get("evidence_ids", ["", ""])
+        return cls(
+            id=data["id"],
+            evidence_ids=(evidence_ids[0], evidence_ids[1]),
+            method=data.get("method", "visual"),
+            similarities_cn=tuple(data.get("similarities_cn", ())),
+            differences_cn=tuple(data.get("differences_cn", ())),
+            limitations_cn=tuple(data.get("limitations_cn", ())),
+            source_group_relation=data.get(
+                "source_group_relation", "unknown"),
+            observation_ids=tuple(data.get("observation_ids", ())),
+        )
+
+
 def stable_investigation_id(prefix: str, parts: Iterable[str]) -> str:
     payload = "|".join(parts).encode("utf-8")
     digest = hashlib.sha256(payload).hexdigest()[:16]
     return f"{prefix}_{digest}"
+
+
+def source_group_id(root_record_id: str) -> str:
+    """Return a stable public ID for one record or oral lineage."""
+    return stable_investigation_id("source_group", (root_record_id,))
+
+
+def build_reading_statements(
+        evidence: EvidencePublicView, reading: DocumentReading,
+        record: RecordPublicView | None) -> tuple[SourceStatement, ...]:
+    """Turn a readable carrier into sourced claims without consulting truth."""
+    if (reading.status != "readable" or record is None
+            or reading.readability < 0.20):
+        return ()
+    count = max(1, round(len(record.claims) * reading.readability))
+    statements = []
+    group_type = (
+        "oral_tradition" if record.record_type == "oral_tradition"
+        else "record_lineage")
+    for index, claim in enumerate(record.claims[:count], 1):
+        statements.append(SourceStatement(
+            id=stable_investigation_id(
+                "statement", (reading.id, str(index), claim.semantic_key())),
+            speaker_type="player_reading",
+            speaker_id="player",
+            presented_evidence_id=evidence.id,
+            source_evidence_id=evidence.id,
+            source_record_root_id=record.source_root_id,
+            statement_type="document_transcription",
+            statement_cn=f"文书中可辨认的一项说法是：{claim.statement_cn}",
+            basis_codes=("visible_text", "retained_claim"),
+            uncertainty_codes=("record_claim_not_truth",),
+            claim=claim,
+            perspective=record.perspective,
+            carrier_condition=evidence.condition,
+            comprehension=reading.readability,
+            source_group_id=(record.source_group_id
+                             or source_group_id(record.source_root_id)),
+            source_group_type=group_type,
+            transmission_depth=(1 if record.id != record.source_root_id else 0),
+        ))
+    return tuple(statements)

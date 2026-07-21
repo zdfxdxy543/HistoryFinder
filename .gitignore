@@ -17,6 +17,9 @@ models/
 *.gguf
 *.log
 
+# Frontend dependencies (the built player prototype is kept in player/dist)
+player/node_modules/
+
 # Editor and operating-system files
 .idea/
 .vscode/

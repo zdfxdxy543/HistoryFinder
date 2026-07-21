@@ -110,6 +110,14 @@ STATE_PHRASES = {
 }
 
 
+def observation_description(namespace: str, value: str) -> str:
+    """Return a player-facing phrase for one objective feature code."""
+    if namespace == "damage":
+        return STATE_PHRASES.get(value, "保存状态暂时难以判断")
+    return PHRASES.get(namespace, {}).get(
+        value, value.replace("_", " "))
+
+
 def _tag_map(features: dict) -> dict[str, str]:
     result = {}
     for tag in features.get("tags", []):
