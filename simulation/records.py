@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 
+from simulation.written_content import PUBLIC_INSCRIPTION_SUBTYPES
+
 
 @dataclass
 class Claim:
@@ -130,6 +132,9 @@ RECORD_TYPES = {
     "trade_ledger": "ledger",
     "relief_receipt": "receipt",
     "treaty_tablet": "treaty",
+    "foundation_stone": "inscription",
+    "treaty_pillar": "treaty_inscription",
+    "ruler_tomb": "epitaph",
     "literary_manuscript": "literary_work",
     "literary_commentary": "commentary",
     "traveling_literary_copy": "literary_copy",
@@ -157,7 +162,8 @@ class RecordGenerator:
                                  ) -> dict[str, list[HistoricalRecord]]:
         records = {}
         for recipe in recipes:
-            if recipe["type"] not in {"document", "oral"}:
+            if (recipe["type"] not in {"document", "oral"}
+                    and recipe["subtype"] not in PUBLIC_INSCRIPTION_SUBTYPES):
                 continue
             subtype = recipe["subtype"]
             original = self._create_record(

@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from simulation.names import generate_unique_name
+from simulation.technology import TECHNOLOGY_ARTIFACT_SUBTYPES
 
 
 TILE_GRASS = 0
@@ -85,6 +86,10 @@ DIRECT_ARTIFACT_PLACEMENTS = {
     "burned_structures": "structural",
     "demonstration_model": "workbench_display",
     "crafted_item": "workbench_display",
+    **{
+        subtype: "workbench_display"
+        for subtype in TECHNOLOGY_ARTIFACT_SUBTYPES
+    },
 }
 
 
@@ -799,13 +804,16 @@ class LocalMapBuilder:
                              radius_x, radius_y)
         elif profile.layout_type == "river":
             if profile.water_axis == "vertical":
-                for x in (profile.width // 6, profile.width * 2 // 3):
-                    self._carve_path(tiles, roads, profile,
-                                     (x, 3), (x, profile.height - 4), x)
-            else:
-                for y in (profile.height // 6, profile.height * 2 // 3):
+                # Crossing streets must run perpendicular to the river.  The
+                # previous orientation produced roads along each bank and no
+                # guaranteed way across the water.
+                for y in (profile.height // 3, profile.height * 2 // 3):
                     self._carve_path(tiles, roads, profile,
                                      (3, y), (profile.width - 4, y), y)
+            else:
+                for x in (profile.width // 3, profile.width * 2 // 3):
+                    self._carve_path(tiles, roads, profile,
+                                     (x, 3), (x, profile.height - 4), x)
         else:
             self._carve_ring(tiles, roads, profile, profile.hub,
                              max(12, profile.width // 5),
@@ -865,7 +873,11 @@ class LocalMapBuilder:
             if not (0 <= px < profile.width and 0 <= py < profile.height):
                 continue
             index = py * profile.width + px
-            tiles[index] = TILE_BRIDGE if tiles[index] == TILE_WATER else TILE_ROAD
+            tiles[index] = (
+                TILE_BRIDGE
+                if tiles[index] in {TILE_WATER, TILE_BRIDGE}
+                else TILE_ROAD
+            )
             roads.add((px, py))
 
     def _place_buildings(self, tiles: list[int], roads: set[tuple[int, int]],

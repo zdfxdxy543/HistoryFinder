@@ -201,7 +201,7 @@ class SettlementScene extends Phaser.Scene {
     } else if (tile === 13 || tile === 14) {
       context.strokeStyle = tile === 13
         ? "rgba(169, 166, 95, .75)"
-        : "rgba(185, 154, 109, .9)";
+        : "rgba(82, 54, 33, .95)";
       context.lineWidth = 2;
       context.beginPath();
       const start = tile === 13 ? 6 : 4;
@@ -211,6 +211,13 @@ class SettlementScene extends Phaser.Scene {
         context.lineTo(px + 29, py + row);
       }
       context.stroke();
+      if (tile === 14) {
+        context.fillStyle = "rgba(49, 35, 24, .95)";
+        context.fillRect(px + 2, py + 2, 3, TILE_SIZE - 4);
+        context.fillRect(px + TILE_SIZE - 5, py + 2, 3, TILE_SIZE - 4);
+        this.fillCircle(context, px + 8, py + 7, 1.5, "#d6b16f");
+        this.fillCircle(context, px + 24, py + 25, 1.5, "#d6b16f");
+      }
     } else if (tile === 15) {
       context.fillStyle = "rgba(226, 232, 224, .55)";
       context.fillRect(px + 6, py + 7, 3, 2);

@@ -26,9 +26,14 @@ from simulation.evidence import (
 from simulation.records import HistoricalRecord, RecordGenerator
 from simulation.storage import StorageManager, StorageSite
 from simulation.written_content import (
-    build_written_content,
-    build_written_copy_content,
+    PUBLIC_INSCRIPTION_SUBTYPES,
 )
+from simulation.text_carriers import (
+    initialize_text_plan,
+    materialize_text_carrier,
+)
+from simulation.technology import TECHNOLOGY_CATALOG
+from simulation.research import generate_research_process
 from simulation.pressures import compute_all_pressures, tick_economy
 from simulation.event_rules import EventRuleRegistry, EventRuleResult
 from simulation.effects import (
@@ -60,10 +65,40 @@ DISASTER_RECOVERY_FOCUS = {
 }
 
 LITERARY_TITLES = {
+    # Legacy genres remain readable, but are no longer selected for new works.
     "epic": ["七座城门之歌", "灰河远征记", "守夜者长歌", "群山之后"],
     "drama": ["空王座", "两枚印记", "雨夜城门", "最后一盏灯"],
-    "chronicle": ["石墙编年", "河谷诸年记", "旧市纪事", "八任执政者记"],
     "lyric_cycle": ["十二月歌", "井边短章", "风过麦田", "远路与归人"],
+}
+
+HISTORY_THEME_BY_EVENT = {
+    "founding": "建城",
+    "war": "战乱",
+    "raid": "边境冲突",
+    "rebellion": "反抗",
+    "treaty": "盟约",
+    "ruler_change": "继承",
+    "disaster": "灾变",
+    "relief": "救援",
+    "reconstruction": "重建",
+    "decline": "衰落",
+    "discovery": "技术",
+    "exploration": "远行",
+    "construction": "营建",
+    "trade": "商路",
+    "economic": "生计",
+    "population_milestone": "城镇发展",
+}
+
+BIOGRAPHY_THEME_BY_ROLE = {
+    "founder": "建城",
+    "ruler": "执政",
+    "general": "征战",
+    "rebel_leader": "反抗",
+    "diplomat": "外交",
+    "scholar": "研究",
+    "writer": "写作",
+    "heir": "继承",
 }
 
 THEORETICAL_TITLES = {
@@ -72,12 +107,6 @@ THEORETICAL_TITLES = {
     "medicine": ["脉息与热病辨", "创伤清洗论", "草药配伍考"],
     "astronomy": ["行星周期表解", "影长与季节论", "星位观测法"],
 }
-
-TECHNOLOGY_TITLES = [
-    "改良滑轮组", "深沟轮作法", "封闭式蓄水槽", "标准化药材秤",
-    "齿轮传动架", "双层炉膛", "石拱承重法", "星位定向仪",
-]
-
 
 @dataclass
 class World:
@@ -323,6 +352,21 @@ class World:
             year, settlement.id, settlement.name,
             old_ruler.name, new_ruler.name, "death",
             old_ruler.id, new_ruler.id)
+        life_sources = self._select_person_history(
+            old_ruler.id, year, limit=6)
+        event.details.update({
+            "epitaph_subject_id": old_ruler.id,
+            "epitaph_subject_name": old_ruler.name,
+            "epitaph_location_name": settlement.name,
+            "epitaph_birth_year": old_ruler.birth_year,
+            "epitaph_death_year": year,
+            "epitaph_age": old_ruler.age_at(year),
+            "epitaph_roles": list(old_ruler.roles),
+            "epitaph_sources": life_sources,
+            "epitaph_source_event_ids": [
+                source["event_id"] for source in life_sources
+            ],
+        })
         event.effect_ids = effect_ids
         event.effects = [effect_to_dict(effect)]
         event.importance_score = 0.4
@@ -520,13 +564,29 @@ class World:
             author = self._get_or_create_officeholder(
                 settlement.id, year, "writer")
             genre = result.selected_outcome.outcome_type
-            work_title = self._stable_event_choice(
-                event.id, LITERARY_TITLES.get(genre, ["无题文稿"]))
+            biography_subject = None
+            if genre == "biography":
+                biography_subject, literary_sources = \
+                    self._select_biography_subject(
+                        settlement.id, year, author.id)
+                if biography_subject is None:
+                    # A new world normally has at least its founder's history.
+                    # Keep the event grounded if a minimal/legacy world does not.
+                    genre = "chronicle"
+                    literary_sources = self._select_literary_sources(
+                        settlement.id, year)
+            else:
+                literary_sources = self._select_literary_sources(
+                    settlement.id, year)
+            work_title = self._build_literary_title(
+                event.id, year, genre, settlement, literary_sources,
+                biography_subject)
             genre_names = {
                 "epic": "长篇叙事诗",
                 "drama": "剧作",
                 "chronicle": "地方编年史",
                 "lyric_cycle": "组诗",
+                "biography": "人物传记",
             }
             genre_name = genre_names.get(genre, "文学作品")
             event.title = f"{author.name}完成《{work_title}》"
@@ -538,11 +598,24 @@ class World:
                 "genre": genre,
                 "genre_name": genre_name,
                 "work_title": work_title,
+                "setting_name": settlement.name,
+                "source_event_ids": [
+                    source["event_id"] for source in literary_sources
+                ],
+                "literary_sources": literary_sources,
                 "description_cn": (
                     f"{year}年，{author.name}在{settlement.name}完成"
                     f"{genre_name}《{work_title}》。抄写者很快制作了数份副本。"
                 ),
             })
+            if biography_subject is not None:
+                event.details.update({
+                    "biography_subject_id": biography_subject.id,
+                    "biography_subject_name": biography_subject.name,
+                    "biography_subject_birth_year": biography_subject.birth_year,
+                    "biography_subject_death_year": biography_subject.death_year,
+                    "biography_subject_roles": list(biography_subject.roles),
+                })
 
         elif event.event_type == "theoretical_work":
             scholar = self._get_or_create_officeholder(
@@ -576,24 +649,210 @@ class World:
         elif event.event_type == "discovery":
             discoverer = self._get_or_create_officeholder(
                 settlement.id, year, "scholar")
-            technology_name = self._stable_event_choice(
-                event.id, TECHNOLOGY_TITLES)
-            event.title = f"{settlement.name}制成{technology_name}"
+            technology = self._stable_event_choice(
+                event.id, list(TECHNOLOGY_CATALOG))
+            research_process = generate_research_process(
+                self.seed,
+                event.id,
+                technology,
+                year,
+                settlement.id,
+                settlement.name,
+                discoverer.id,
+                discoverer.name,
+            )
+            event.title = f"{settlement.name}制成{technology.title}"
             event.person_ids = [discoverer.id]
             event.details.update({
                 "discoverer_id": discoverer.id,
                 "discoverer_name": discoverer.name,
-                "discovery_name": technology_name,
+                "discovery_name": technology.title,
+                "technology_key": technology.key,
+                "artifact_subtype": technology.artifact_subtype,
+                "artifact_display_name": technology.display_name,
+                "artifact_material": technology.material,
+                "technology_function_cn": technology.function_cn,
+                "research_process": research_process,
                 "description_cn": (
                     f"{year}年，{discoverer.name}与工匠在{settlement.name}"
-                    f"完成了{technology_name}的第一批可重复试制。"
+                    f"完成了{technology.title}的第一批可重复试制。"
+                    f"这套装置用于{technology.function_cn}。"
                 ),
             })
 
-    def _stable_event_choice(self, event_id: str, options: list[str]) -> str:
+    def _stable_event_choice(self, event_id: str, options: list[Any]) -> Any:
         payload = f"{self.seed}|{event_id}".encode("utf-8")
         index = int(hashlib.sha256(payload).hexdigest()[:8], 16)
         return options[index % len(options)]
+
+    def _build_literary_title(
+            self, event_id: str, creation_year: int, genre: str,
+            settlement: Settlement,
+            sources: list[dict[str, Any]],
+            subject: Person | None = None) -> str:
+        """Combine grounded keywords into a deterministic, non-pool title."""
+        event_themes = list(dict.fromkeys(
+            HISTORY_THEME_BY_EVENT.get(source.get("event_type"), "往事")
+            for source in sources
+        ))
+        if genre == "biography" and subject is not None:
+            role_themes = [
+                BIOGRAPHY_THEME_BY_ROLE[role]
+                for role in subject.roles
+                if role in BIOGRAPHY_THEME_BY_ROLE
+            ]
+            themes = list(dict.fromkeys(role_themes + event_themes))[:2]
+            theme_text = "与".join(themes) if themes else "生平"
+            patterns = [
+                f"{subject.name}的{theme_text}经历",
+                f"{subject.name}：{theme_text}生平",
+                f"{subject.name}的{theme_text}人生记录",
+            ]
+            base_title = self._stable_event_choice(
+                f"{event_id}|biography_form", patterns)
+            return f"{base_title}（{creation_year}年写成）"
+
+        themes = event_themes[:2] or ["历年"]
+        theme_text = "与".join(themes)
+        forms = ["编年", "纪事", "年录"]
+        form = self._stable_event_choice(
+            f"{event_id}|chronicle_form", forms)
+        return f"{settlement.name}{theme_text}{form}（{creation_year}年写成）"
+
+    def _select_literary_sources(self, settlement_id: str, year: int,
+                                 limit: int = 3) -> list[dict[str, Any]]:
+        """Freeze earlier local events that a new work can draw upon."""
+        excluded_types = {
+            "literary_work", "literary_spread", "theoretical_work",
+        }
+        narrative_priority = {
+            "war": 10, "rebellion": 10, "disaster": 10,
+            "raid": 9, "ruler_change": 9, "decline": 9,
+            "founding": 8, "treaty": 8, "reconstruction": 8,
+            "relief": 8, "discovery": 7, "exploration": 7,
+            "construction": 6, "trade": 6, "economic": 6,
+            "crime": 5, "duel": 5, "festival": 4,
+            "population_milestone": 4, "marriage": 3,
+            "notable_birth": 2, "omen": 2,
+        }
+        candidates = [
+            event for event in self.get_settlement_events(settlement_id)
+            if event.year < year and event.event_type not in excluded_types
+        ]
+
+        def rank(source: HistoricalEvent) -> tuple[float, int, str]:
+            priority = narrative_priority.get(source.event_type, 1)
+            historical_weight = (
+                priority
+                + source.importance_score * 4.0
+                + source.visibility_score * 2.0
+            )
+            return historical_weight, source.year, source.id
+
+        selected = sorted(candidates, key=rank, reverse=True)[:limit]
+        selected.sort(key=lambda source: (source.year, source.id))
+        return [self._snapshot_history_event(source) for source in selected]
+
+    def _select_biography_subject(
+            self, settlement_id: str, year: int,
+            author_id: str) -> tuple[Person | None, list[dict[str, Any]]]:
+        candidates = []
+        for person in self.persons.values():
+            if (person.id == author_id
+                    or person.settlement_id != settlement_id
+                    or person.birth_year > year):
+                continue
+            sources = self._select_person_history(person.id, year, limit=6)
+            if not sources:
+                continue
+            importance = sum(
+                float(source.get("importance_score", 0.0))
+                for source in sources)
+            candidates.append((len(sources), importance, person.id,
+                               person, sources))
+        if not candidates:
+            return None, []
+        candidates.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        _, _, _, subject, sources = candidates[0]
+        return subject, sources
+
+    def _select_person_history(self, person_id: str, year: int,
+                               limit: int = 6) -> list[dict[str, Any]]:
+        excluded_types = {
+            "literary_work", "literary_spread", "theoretical_work",
+        }
+        candidates = [
+            event for event in self.events
+            if event.year < year and person_id in event.person_ids
+            and event.event_type not in excluded_types
+        ]
+        ranked = sorted(
+            candidates,
+            key=lambda source: (
+                source.importance_score + source.severity,
+                source.visibility_score,
+                source.year,
+                source.id,
+            ),
+            reverse=True,
+        )[:limit]
+        ranked.sort(key=lambda source: (source.year, source.id))
+        return [
+            self._snapshot_history_event(source, person_id)
+            for source in ranked
+        ]
+
+    def _snapshot_history_event(
+            self, source: HistoricalEvent,
+            subject_id: str | None = None) -> dict[str, Any]:
+        participant_names = [
+            self.settlements[participant_id].name
+            for participant_id in source.participants
+            if participant_id in self.settlements
+        ]
+        person_names = [
+            self.persons[person_id].name
+            for person_id in source.person_ids
+            if person_id in self.persons
+        ]
+        snapshot = {
+            "event_id": source.id,
+            "year": source.year,
+            "event_type": source.event_type,
+            "title": source.title,
+            "summary": source.details.get("description_cn", source.title),
+            "participant_names": participant_names,
+            "person_names": person_names,
+            "importance_score": source.importance_score,
+        }
+        if subject_id is not None:
+            snapshot["subject_role"] = self._person_role_in_event(
+                source, subject_id)
+        return snapshot
+
+    @staticmethod
+    def _person_role_in_event(source: HistoricalEvent,
+                              subject_id: str) -> str:
+        details = source.details
+        role_fields = (
+            ("founder_id", "建城者"),
+            ("discoverer_id", "研发者"),
+            ("rebel_leader_id", "反抗领袖"),
+            ("old_ruler_id", "当时的统治者"),
+            ("new_ruler_id", "继任者"),
+            ("person_id", "事件当事人"),
+            ("parent_id", "家长"),
+        )
+        for field_name, role_name in role_fields:
+            if details.get(field_name) == subject_id:
+                return role_name
+        if subject_id in details.get("commander_ids", []):
+            return "军队指挥者"
+        if subject_id in details.get("ruler_ids", []):
+            return "当时的统治者"
+        if subject_id in details.get("signer_ids", []):
+            return "签约者"
+        return "事件参与者"
 
     def _remove_ruler_role_if_landless(self, person_id: str | None) -> None:
         if not person_id:
@@ -1448,31 +1707,42 @@ class World:
             evidence.source_event_ids = [evidence.event_id]
             evidence.retained_claim_ids = [
                 claim.id for claim in record.claimed_facts]
-        # Saves created before evidence schema 4 did not persist document text.
-        events_by_id = {event.id: event for event in w.events}
+        # Old carriers keep persisted wording.  Missing text becomes a lazy
+        # plan so a discovered copy can still materialize its root first.
+        copy_indexes: dict[str, int] = {}
+        for evidence in sorted(w.evidence.values(), key=lambda item: item.id):
+            base_subtype = evidence.subtype.removesuffix("_copy")
+            if (evidence.evidence_type != "document"
+                    and base_subtype not in PUBLIC_INSCRIPTION_SUBTYPES):
+                continue
+            copy_index = None
+            if evidence.is_copy_of:
+                copy_index = copy_indexes.get(evidence.is_copy_of, 0)
+                copy_indexes[evidence.is_copy_of] = copy_index + 1
+            initialize_text_plan(
+                evidence, w.seed, copy_index=copy_index,
+                ready=bool(evidence.content_data.get("written_content")))
+        # Older saves described several monuments as inscribed without storing
+        # the actual inscription.  Backfill the carrier text deterministically.
         for evidence in w.evidence.values():
-            if (evidence.evidence_type == "document"
-                    and "written_content" not in evidence.content_data):
-                source_event = events_by_id.get(evidence.event_id)
-                if source_event is not None:
-                    parent = w.evidence.get(evidence.is_copy_of)
-                    parent_written = (
-                        parent.content_data.get("written_content")
-                        if parent is not None else None)
-                    if evidence.is_copy_of and parent_written:
-                        evidence.content_data["written_content"] = \
-                            build_written_copy_content(
-                                parent_written, w.seed, evidence.id, 0,
-                                evidence.created_year)
-                    else:
-                        evidence.content_data["written_content"] = \
-                            build_written_content(
-                                source_event, evidence.subtype, w.seed,
-                                evidence.id,
-                                is_copy=bool(evidence.is_copy_of))
-                    evidence.schema_version = 4
+            base_subtype = evidence.subtype.removesuffix("_copy")
+            if base_subtype not in PUBLIC_INSCRIPTION_SUBTYPES:
+                continue
+            if "written_content" not in evidence.content_data:
+                materialize_text_carrier(w, evidence.id)
+            tags = evidence.physical_features.setdefault("tags", [])
+            tags[:] = [
+                tag for tag in tags
+                if not tag.startswith(("script:", "legibility:", "visibility:"))
+            ]
+            tags.extend([
+                "script:monumental_letters",
+                "legibility:clear_large_letters",
+                "visibility:public_inscription",
+            ])
         legacy_storage = "storage_sites" not in data
         for evidence in sorted(w.evidence.values(), key=lambda item: item.id):
+            evidence.schema_version = 6
             if (evidence.container_id in w.storage_sites
                     and evidence.holder_id in w.storage_sites):
                 continue
@@ -1484,7 +1754,6 @@ class World:
                 evidence, settlement, evidence.created_year,
                 owner_person_id=(record.author_person_id if record else None),
                 reason="legacy_location_migration")
-            evidence.schema_version = 6
         if legacy_storage:
             for settlement in w.settlements.values():
                 if not settlement.alive:

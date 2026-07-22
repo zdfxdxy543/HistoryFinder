@@ -7,6 +7,7 @@ from game.repl import GameREPL
 from simulation.person import Person
 from simulation.records import Claim, HistoricalRecord
 from simulation.world import World
+from simulation.text_carriers import has_text_carrier
 
 
 @pytest.fixture(scope="module")
@@ -59,11 +60,14 @@ def test_generated_records_have_multiple_perspectives(recorded_world):
 def test_record_carriers_do_not_copy_event_truth(recorded_world):
     carriers = [
         evidence for evidence in recorded_world.evidence.values()
-        if evidence.evidence_type in {"document", "oral"}
+        if (evidence.evidence_type in {"document", "oral"}
+            or has_text_carrier(evidence))
     ]
     traces = [
         evidence for evidence in recorded_world.evidence.values()
-        if evidence.evidence_type in {"artifact", "structure", "environmental"}
+        if (evidence.evidence_type
+            in {"artifact", "structure", "environmental"}
+            and not has_text_carrier(evidence))
     ]
 
     assert carriers and traces

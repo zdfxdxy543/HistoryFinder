@@ -21,6 +21,8 @@ export type MapEntity = {
   placement_kind?: string;
   storage_site_id?: string;
   blocks_movement?: boolean;
+  can_read?: boolean;
+  quick_read?: boolean;
 };
 
 export type LocalBuilding = {

@@ -179,6 +179,7 @@ button { color: inherit; }
 .panel-heading .eyebrow { margin: 0 0 6px; color: var(--ochre); font-size: 10px; font-weight: 800; text-transform: uppercase; }
 .panel-heading h2 { margin: 0; font-size: 19px; line-height: 1.25; overflow-wrap: anywhere; }
 .panel-heading p:last-child { margin: 7px 0 0; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.plain-sight-copy { margin: 0; padding: 12px 20px; color: #2d3931; background: #f5f7f3; border-bottom: 1px solid var(--line); line-height: 1.65; overflow-wrap: anywhere; }
 
 .command-row { display: flex; flex-wrap: wrap; gap: 7px; padding: 12px 20px; border-bottom: 1px solid var(--line); }
 .command-button, .icon-command {

@@ -62,6 +62,40 @@ PHRASES = {
         "riveted_parts": "几个部件原本似乎由铆钉连接",
         "worn_edges": "边缘有长期使用形成的磨圆",
         "mounting_socket": "底部留有可以固定在其他物体上的接口",
+        "pulley_cluster": "数个带槽木轮沿同一轴架排列",
+        "toothed_drum": "卷筒一侧装有只能单向越齿的止动片",
+        "meshed_gears": "三只大小不同的齿轮能够依次咬合",
+        "crank_frame": "侧面的曲柄与中央转轴连成一体",
+        "spaced_tubes": "底部排列着间距一致的落种管",
+        "adjustable_blade": "犁刃后方有数档用于定位的销孔",
+        "slotted_gate": "闸板可沿两侧木槽上下移动",
+        "linked_cups": "一圈小木斗由链节首尾相接",
+        "sealed_channels": "槽体分为封闭储水区和独立取水口",
+        "vented_chambers": "底板下留有彼此贯通的架空风道",
+        "graduated_balance": "细梁刻度与成组小砝码互相对应",
+        "nested_instruments": "不同形状的器具各有固定凹槽",
+        "coiled_condenser": "弯曲金属管从密闭容器上方引出",
+        "separated_chambers": "燃料室与上方受热室由带孔炉床隔开",
+        "radial_ribs": "多根弧形木肋围绕同一中心拼合",
+        "sighting_vanes": "两片带孔照准片可沿刻度环转动",
+    },
+    "mechanism": {
+        "rope_multiplier": "绳索绕过多只槽轮后形成数段共同受力的绳路",
+        "reverse_stop": "棘齿允许卷筒收绳，却会卡住反向转动",
+        "ratio_transfer": "转动一只齿轮时，其余齿轮以不同速度联动",
+        "rotary_drive": "曲柄推动转轴连续转动而不需反复换手",
+        "measured_seed": "转轴每走固定距离才会开放一次落种孔",
+        "depth_control": "改变定位销所在孔位会改变犁刃倾角",
+        "flow_control": "闸板高度可以分档固定，从而改变过水截面",
+        "continuous_lift": "木斗随链条循环升降，在顶端依次倾倒",
+        "evaporation_control": "狭窄取水口使主体水面保持遮蔽",
+        "dry_airflow": "风可穿过底部风道，却不直接吹散谷粒",
+        "repeatable_measure": "刻度与配套砝码让不同操作者能够复现称量",
+        "cleanable_tools": "器具形状简单且可拆开煮洗，凹槽用于分开放置",
+        "vapor_condensation": "蒸气沿长管降温后从末端汇成液滴",
+        "controlled_draft": "下层进气经炉床孔洞集中进入燃烧区",
+        "temporary_support": "弧形木肋共同托住尚未闭合的拱券",
+        "angular_sighting": "对齐两片照准孔后可在刻度环上读出角度",
     },
     "arrangement": {
         "aligned": "构件大致沿同一方向排列",
@@ -80,12 +114,14 @@ PHRASES = {
         "hurried_hand": "字符大小不一，笔画显得仓促",
         "margin_note": "正文旁有另一种笔迹留下的短注",
         "ruled_columns": "文字被分成数个规则栏目",
+        "monumental_letters": "正面刻着从数步外也能看清轮廓的大字",
     },
     "legibility": {
         "isolated_glyphs": "目前只能辨出零散字符",
         "numbers_and_symbols": "部分数字和重复符号仍然清楚",
         "missing_ends": "首尾已经缺失，中央几行尚可辨认",
         "seal_area_clear": "封印附近的短句保存得相对完整",
+        "clear_large_letters": "主要大字仍可直接辨认",
     },
     "delivery": {
         "hesitant": "讲述时常出现停顿和自我修正",
@@ -191,12 +227,48 @@ def describe_evidence(context: dict) -> str:
         uncertainty = "在完成辨字、比对和释读前，不能确定它记录了什么。"
     elif evidence_type == "artifact":
         detail_parts.append(_phrase(tags, "form", "器形只能辨认一部分"))
+        if tags.get("mechanism"):
+            detail_parts.append(_phrase(tags, "mechanism", "部件之间存在联动关系"))
         uncertainty = "仅凭外观还不能确定它由谁使用，或为何留在这里。"
     elif evidence_type == "structure":
         detail_parts.append(_phrase(tags, "arrangement", "构件排列并不完整"))
+        if tags.get("visibility") == "public_inscription":
+            detail_parts.extend([
+                _phrase(tags, "script", "正面留有公开展示的刻字"),
+                _phrase(tags, "legibility", "部分大字仍可直接辨认"),
+            ])
         uncertainty = "现有残存部分不足以确定建筑的年代和具体用途。"
     else:
         detail_parts.append(_phrase(tags, "stratigraphy", "层内成分还需要取样"))
         uncertainty = "形成原因仍需要结合周围地层和其他样本判断。"
 
     return f"{opening}\n\n{'；'.join(detail_parts)}。{uncertainty}"
+
+
+def describe_at_glance(context: dict,
+                       inscription_preview: dict | None = None) -> str:
+    """Describe only features visible before a deliberate examination."""
+    observed_name = context.get("observed_name", "不明物件")
+    state = context.get("state_key", "intact")
+    features = context.get("physical_features", {})
+    tags = _tag_map(features)
+    scale = _phrase(tags, "scale", "尺寸一时难以判断")
+    color = _phrase(tags, "color", "颜色不明")
+    condition = STATE_PHRASES.get(state, "保存状态暂时难以判断")
+    parts = [f"一眼可以看出这是{observed_name}，{scale}，呈{color}。", f"{condition}。"]
+
+    if tags.get("visibility") == "public_inscription":
+        script = _phrase(tags, "script", "正面有公开展示的大字")
+        if not inscription_preview:
+            parts.append(f"{script}。")
+        elif inscription_preview.get("status") == "readable" \
+                and inscription_preview.get("text"):
+            parts.append(
+                f"{script}，其中最醒目的文字是“{inscription_preview['text']}”。"
+                "这是刻在载体上的原话，不代表其内容已经得到证实。")
+        elif inscription_preview.get("status") == "unknown_language":
+            parts.append(
+                f"{script}，但你不懂这种语言，只能确认字形与排列。")
+        else:
+            parts.append(f"{script}，但现存部分不足以直接读成句子。")
+    return "".join(parts)

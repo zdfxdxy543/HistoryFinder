@@ -10,9 +10,16 @@ from dataclasses import dataclass, field
 from typing import Optional
 from config import MATERIAL_DURABILITY, MATERIAL_DECAY_RATE
 from simulation.written_content import (
+    PUBLIC_INSCRIPTION_SUBTYPES,
     build_written_content,
     build_written_copy_content,
 )
+from simulation.text_carriers import (
+    advance_text_damage,
+    initialize_text_plan,
+    prepare_materialized_carrier,
+)
+from simulation.technology import TECHNOLOGY_BY_SUBTYPE
 
 
 @dataclass
@@ -156,6 +163,7 @@ def tick_natural_decay(evidence: Evidence, climate_factor: float = 1.0,
     decay = base_decay * material_rate * climate_factor * random_factor
     evidence.current_durability -= decay
     evidence.update_state()
+    advance_text_damage(evidence)
 
     return evidence.state == "destroyed"
 
@@ -230,6 +238,7 @@ def apply_event_destruction(location_id: str, evidence_dict: dict[str, Evidence]
             if rng.random() < 0.3:
                 evd.current_durability *= rng.uniform(0.5, 0.8)
                 evd.update_state()
+                advance_text_damage(evd)
                 stats["degraded"] += 1
             else:
                 stats["survived"] += 1
@@ -534,6 +543,10 @@ EVIDENCE_DISPLAY_NAMES_CN = {
     "duel_story": "关于一场决斗的故事",
     "duel_weapon": "带缺口的单件兵器",
 }
+EVIDENCE_DISPLAY_NAMES_CN.update({
+    subtype: profile.display_name
+    for subtype, profile in TECHNOLOGY_BY_SUBTYPE.items()
+})
 
 
 MATERIAL_FEATURE_OPTIONS = {
@@ -628,23 +641,44 @@ class EvidenceGenerator:
         }
 
         if evidence_type == "document":
-            tags.extend([
-                "script:" + rng.choice([
-                    "narrow_rows", "hurried_hand", "margin_note", "ruled_columns",
-                ]),
-                "legibility:" + rng.choice([
-                    "isolated_glyphs", "numbers_and_symbols",
-                    "missing_ends", "seal_area_clear",
-                ]),
-            ])
+            if base_subtype in PUBLIC_INSCRIPTION_SUBTYPES:
+                tags.extend([
+                    "script:monumental_letters",
+                    "legibility:clear_large_letters",
+                    "visibility:public_inscription",
+                ])
+            else:
+                tags.extend([
+                    "script:" + rng.choice([
+                        "narrow_rows", "hurried_hand", "margin_note",
+                        "ruled_columns",
+                    ]),
+                    "legibility:" + rng.choice([
+                        "isolated_glyphs", "numbers_and_symbols",
+                        "missing_ends", "seal_area_clear",
+                    ]),
+                ])
         elif evidence_type == "artifact":
-            tags.append("form:" + rng.choice([
-                "asymmetric", "riveted_parts", "worn_edges", "mounting_socket",
-            ]))
+            technology = TECHNOLOGY_BY_SUBTYPE.get(base_subtype)
+            if technology is not None:
+                tags.extend([
+                    "form:" + technology.form_code,
+                    "mechanism:" + technology.mechanism_code,
+                ])
+            else:
+                tags.append("form:" + rng.choice([
+                    "asymmetric", "riveted_parts", "worn_edges", "mounting_socket",
+                ]))
         elif evidence_type == "structure":
             tags.append("arrangement:" + rng.choice([
                 "aligned", "hardened_mortar", "wide_base", "different_orientation",
             ]))
+            if base_subtype in PUBLIC_INSCRIPTION_SUBTYPES:
+                tags.extend([
+                    "script:monumental_letters",
+                    "legibility:clear_large_letters",
+                    "visibility:public_inscription",
+                ])
         elif evidence_type == "environmental":
             tags.append("stratigraphy:" + rng.choice([
                 "charcoal_and_bone", "uniform_grains",
@@ -693,26 +727,30 @@ class EvidenceGenerator:
         source_records = source_records or {}
 
         for recipe in recipes:
-            durability = MATERIAL_DURABILITY.get(recipe["material"], 50)
+            subtype = recipe["subtype"]
+            material = recipe["material"]
+            if event.event_type == "discovery" and subtype == "crafted_item":
+                subtype = event.details.get("artifact_subtype", subtype)
+                material = event.details.get("artifact_material", material)
+            durability = MATERIAL_DURABILITY.get(material, 50)
             evidence_id = self._next_id()
             records = source_records.get(recipe["subtype"], [])
             record = records[0] if records else None
             content_data = {}
-            if recipe["type"] == "document":
-                content_data["written_content"] = \
-                    self._generate_unique_written_content(
-                        event, recipe["subtype"], evidence_id)
+            is_written_carrier = (
+                recipe["type"] == "document"
+                or subtype in PUBLIC_INSCRIPTION_SUBTYPES)
             retained_claim_ids = (
                 [claim.id for claim in record.claimed_facts] if record else [])
             evidence = Evidence(
                 id=evidence_id,
                 event_id=event.id,
                 evidence_type=recipe["type"],
-                subtype=recipe["subtype"],
+                subtype=subtype,
                 location_type=recipe["location"],
                 location_id=event.primary_location,
                 created_year=event.year,
-                material=recipe["material"],
+                material=material,
                 max_durability=durability,
                 current_durability=durability,
                 state="intact",
@@ -725,20 +763,28 @@ class EvidenceGenerator:
                                 if event.narrative_bias != "neutral" else
                                 self._determine_bias(recipe["type"])),
                 physical_features=self._generate_physical_features(
-                    evidence_id, recipe["type"], recipe["subtype"],
-                    recipe["material"], is_copy=False),
+                    evidence_id, recipe["type"], subtype,
+                    material, is_copy=False),
                 retained_claim_ids=retained_claim_ids,
                 provenance_clues={
                     "estimated_year_range": [event.year - 3, event.year + 3],
                     "origin_location_id": event.primary_location,
-                    "carrier_subtype": recipe["subtype"],
+                    "carrier_subtype": subtype,
                 },
             )
+            if is_written_carrier:
+                initialize_text_plan(evidence, self.seed)
+            if subtype in PUBLIC_INSCRIPTION_SUBTYPES:
+                prepare_materialized_carrier(
+                    evidence,
+                    self._generate_unique_written_content(
+                        event, subtype, evidence_id),
+                )
             evidence_list.append(evidence)
 
             for copy_index in range(recipe.get("copies", 0)):
                 copy_id = self._next_id()
-                copy_subtype = recipe["subtype"] + "_copy"
+                copy_subtype = subtype + "_copy"
                 copy_record = (
                     records[copy_index + 1]
                     if copy_index + 1 < len(records) else record)
@@ -747,12 +793,7 @@ class EvidenceGenerator:
                     if copy_record else [])
                 copy_year = (copy_record.created_year if copy_record else
                              event.year + self.rng.randint(1, 10))
-                copy_content_data = copy_module.deepcopy(evidence.content_data)
-                if recipe["type"] == "document":
-                    copy_content_data["written_content"] = \
-                        self._generate_unique_written_copy(
-                            evidence.content_data["written_content"],
-                            copy_id, copy_index, copy_year)
+                copy_content_data = {}
                 copy = Evidence(
                     id=copy_id,
                     event_id=event.id,
@@ -761,7 +802,7 @@ class EvidenceGenerator:
                     location_type=recipe["location"],
                     location_id=event.primary_location,
                     created_year=copy_year,
-                    material=recipe["material"],
+                    material=material,
                     max_durability=durability,
                     current_durability=durability,
                     state="intact",
@@ -773,7 +814,7 @@ class EvidenceGenerator:
                     narrative_bias=evidence.narrative_bias,
                     physical_features=self._generate_physical_features(
                         copy_id, recipe["type"], copy_subtype,
-                        recipe["material"], is_copy=True),
+                        material, is_copy=True),
                     retained_claim_ids=copy_claim_ids,
                     provenance_clues={
                         "estimated_year_range": [event.year - 1, event.year + 12],
@@ -784,6 +825,16 @@ class EvidenceGenerator:
                     contamination=["copyist_variation"],
                     authenticity="copy",
                 )
+                if is_written_carrier:
+                    initialize_text_plan(
+                        copy, self.seed, copy_index=copy_index)
+                if subtype in PUBLIC_INSCRIPTION_SUBTYPES:
+                    copy_written = self._generate_unique_written_copy(
+                        evidence.content_data["written_content"],
+                        copy_id, copy_index, copy_year)
+                    prepare_materialized_carrier(
+                        copy, copy_written,
+                        parent_written=evidence.content_data["written_content"])
                 evidence_list.append(copy)
 
         return evidence_list

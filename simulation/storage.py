@@ -6,6 +6,8 @@ import hashlib
 from dataclasses import dataclass
 from typing import Optional
 
+from simulation.technology import TECHNOLOGY_ARTIFACT_SUBTYPES
+
 
 SITE_PROFILES = {
     "library_collection": ("library", "藏书室", "supervised", 0.55, 0.55),
@@ -49,7 +51,7 @@ OFFICIAL_DOCUMENTS = {
 PRIVATE_DOCUMENTS = {"rebel_manifesto", "marriage_contract"}
 WORKSHOP_ARTIFACTS = {
     "crafted_item", "demonstration_model", "builders_tools", "reused_fittings",
-}
+} | set(TECHNOLOGY_ARTIFACT_SUBTYPES)
 STOREHOUSE_ARTIFACTS = {
     "supply_crate_remains", "grain_storage_jar", "damaged_relics",
 }

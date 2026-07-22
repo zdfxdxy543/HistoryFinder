@@ -19,12 +19,20 @@ from game.knowledge import PlayerKnowledge
 from game.observation import build_evidence_observations
 from simulation.world import World
 from narrative.llm_interface import generate_narrative, is_llm_available, clear_cache
-from narrative.document_reader import read_document
+from narrative.document_reader import (
+    is_public_inscription,
+    preview_public_inscription,
+    read_document,
+)
 from narrative.context_builder import (
     build_settlement_context,
     build_ruin_context,
     build_evidence_context,
     build_location_investigation_context,
+)
+from simulation.text_carriers import (
+    has_text_carrier,
+    materialize_text_carrier,
 )
 
 
@@ -159,6 +167,10 @@ class GameREPL:
             for i, evd in enumerate(evidence, 1):
                 new_mark = " [新]" if evd.id not in self.examined_evidence else ""
                 print(f"  {i}. {_evidence_display_name(evd)}{new_mark}")
+                preview = preview_public_inscription(
+                    evd, self.known_languages)
+                if preview and preview.get("status") == "readable":
+                    print(f"     醒目刻字：{preview.get('text', '字迹已损')}")
 
 
     def cmd_look(self):
@@ -195,7 +207,7 @@ class GameREPL:
 
 
     def cmd_read(self, target: str):
-        """阅读一份已经检查过的文书。"""
+        """阅读文书；公开碑铭不要求预先精细检查。"""
         if self.current_location_id is None:
             print("你还没有到达任何地方。先 travel 去一个聚落吧。")
             return
@@ -203,10 +215,13 @@ class GameREPL:
         evd = self._resolve_local_evidence(target)
         if evd is None:
             return
-        if evd.id not in self.examined_evidence:
+        if (evd.id not in self.examined_evidence
+                and not is_public_inscription(evd)):
             print(f"你需要先 examine {_evidence_display_name(evd)}，确认它能否安全展开。")
             return
 
+        if has_text_carrier(evd):
+            evd = materialize_text_carrier(self.world, evd.id)
         result = read_document(evd, self.known_languages)
         print(f"\n--- 阅读 {_evidence_display_name(evd)} ---")
         print(result["text"])
@@ -262,7 +277,8 @@ class GameREPL:
         evidence_view = EvidencePublicView.from_evidence(evd)
         record_view = self._record_public_view(evd)
         reading_view = None
-        if evd.evidence_type == "document":
+        if has_text_carrier(evd):
+            evd = materialize_text_carrier(self.world, evd.id)
             reading = read_document(evd, set(consultant.known_languages))
             reading_view = ReadingPublicView.from_result(reading)
 

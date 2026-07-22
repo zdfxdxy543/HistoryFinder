@@ -16,6 +16,7 @@ from game.investigation import (
 from game.knowledge import PlayerKnowledge
 from narrative.document_reader import read_document
 from simulation.world import World
+from simulation.text_carriers import materialize_text_carrier
 
 
 FORBIDDEN_TRUTH_FIELDS = {
@@ -33,6 +34,7 @@ def _document_case(seed=304):
         if item.evidence_type == "document"
     )
     record = world.records[evidence.source_record_id]
+    materialize_text_carrier(world, evidence.id)
     evidence_view = EvidencePublicView.from_evidence(evidence)
     record_view = RecordPublicView.from_record_and_evidence(record, evidence)
     reading_view = ReadingPublicView.from_result(

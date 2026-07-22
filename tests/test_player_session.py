@@ -7,6 +7,7 @@ import pytest
 
 from game.player_session import PlayerActionError, PlayerSession
 from game.local_map import (
+    TILE_BRIDGE,
     TILE_FARMLAND,
     TILE_FOREST,
     TILE_MARSH,
@@ -336,6 +337,32 @@ def test_read_requires_examination(player_session):
         player_session.read(document_id)
 
 
+def test_public_inscription_is_visible_and_readable_without_examination(
+        player_session):
+    inscription = next(
+        item for item in player_session.local_map["entities"]
+        if item["kind"] == "evidence" and item.get("quick_read"))
+    assert inscription["can_read"] is True
+    assert "一眼可以看出" in inscription["description_cn"]
+    assert "原话" in inscription["description_cn"]
+    assert inscription["id"] not in \
+        player_session.knowledge.examined_evidence_ids
+
+    _stand_next_to(player_session, inscription)
+    result = player_session.read(inscription["id"])
+
+    assert result["reading"]["status"] == "readable"
+    assert result["elapsed_minutes"] == 5
+    assert inscription["id"] in \
+        player_session.knowledge.discovered_evidence_ids
+    assert inscription["id"] not in \
+        player_session.knowledge.examined_evidence_ids
+    assert result["local_map"]["discovered_evidence"]
+    assert result["learned_claims"]
+    assert all("声称" in item["statement_cn"]
+               for item in result["learned_claims"])
+
+
 def test_examine_read_and_consult_update_safe_journal(player_session):
     _discover_all_physical_evidence(player_session)
     document_id = next(
@@ -421,6 +448,25 @@ def test_map_sizes_and_geographic_layouts_are_data_driven():
     assert len(signatures) >= 6
     assert min(farmland_centers) < 0.40
     assert max(farmland_centers) > 0.60
+
+    river_maps = [
+        local_map for local_map in maps
+        if local_map["profile"]["layout_type"] == "river"
+    ]
+    assert river_maps
+    for local_map in river_maps:
+        bridges = [
+            (index % local_map["width"], index // local_map["width"])
+            for index, tile in enumerate(local_map["tiles"])
+            if tile == TILE_BRIDGE
+        ]
+        assert len(bridges) >= 6
+        if local_map["profile"]["water_axis"] == "vertical":
+            row_counts = Counter(y for _, y in bridges)
+            assert max(row_counts.values()) >= 3
+        else:
+            column_counts = Counter(x for x, _ in bridges)
+            assert max(column_counts.values()) >= 3
 
     settlement = settlements[0]
     dimensions = []

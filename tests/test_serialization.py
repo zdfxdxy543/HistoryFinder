@@ -156,7 +156,7 @@ def test_world_roundtrip():
         assert w2.persons[person_id].to_dict() == person.to_dict()
 
 
-def test_old_world_save_rebuilds_missing_document_text():
+def test_old_world_save_migrates_missing_document_text_to_a_lazy_plan():
     world = World(seed=42)
     world.generate(years=1)
     data = world.to_dict()
@@ -164,15 +164,16 @@ def test_old_world_save_rebuilds_missing_document_text():
         evidence for evidence in data["evidence"]
         if evidence["evidence_type"] == "document"
     )
-    document_data["content_data"].pop("written_content")
+    document_data["content_data"].pop("written_content", None)
+    document_data["content_data"].pop("text_plan", None)
     document_data["schema_version"] = 3
 
     restored = World.from_dict(data)
     document = restored.evidence[document_data["id"]]
-    written = document.content_data["written_content"]
-    assert document.schema_version == 4
-    assert written["language_code"] == "common"
-    assert written["passages"]
+    assert document.schema_version == 6
+    assert "written_content" not in document.content_data
+    assert document.content_data["text_plan"]["materialization_status"] \
+        == "planned"
 
 
 def test_old_world_save_rebuilds_legacy_rulers():

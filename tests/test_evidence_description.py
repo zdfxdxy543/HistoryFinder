@@ -4,10 +4,16 @@ import copy
 
 from game.repl import GameREPL
 from narrative.context_builder import build_evidence_context
-from narrative.document_reader import read_document
+from narrative.document_reader import (
+    is_public_inscription,
+    preview_public_inscription,
+    read_document,
+)
 from narrative.evidence_describer import describe_evidence
 from narrative.llm_interface import generate_narrative
 from simulation.world import World
+from simulation.text_carriers import materialize_text_carrier
+from simulation.written_content import PUBLIC_INSCRIPTION_SUBTYPES
 
 
 FORBIDDEN_CONTEXT_KEYS = {
@@ -142,7 +148,7 @@ def test_examine_does_not_unlock_internal_event(capsys):
     assert "还没有足够依据" in output
 
 
-def test_every_parchment_document_stores_written_content():
+def test_every_parchment_document_stores_a_lazy_text_plan():
     world = World(seed=42)
     world.generate(years=40)
 
@@ -152,11 +158,55 @@ def test_every_parchment_document_stores_written_content():
     ]
     assert parchments
     for evidence in parchments:
-        written = evidence.content_data.get("written_content")
         assert evidence.evidence_type == "document"
+        assert evidence.content_data.get("text_plan")
+        assert "written_content" not in evidence.content_data
+
+        materialize_text_carrier(world, evidence.id)
+        written = evidence.content_data["written_content"]
         assert written["language_code"] == "common"
         assert written["passages"]
         assert all(passage.get("text") for passage in written["passages"])
+
+
+def test_public_inscriptions_store_words_and_expose_only_the_heading_at_glance():
+    world = World(seed=42)
+    world.generate(years=40)
+    inscriptions = [
+        evidence for evidence in world.evidence.values()
+        if evidence.subtype.removesuffix("_copy")
+        in PUBLIC_INSCRIPTION_SUBTYPES
+    ]
+
+    assert inscriptions
+    assert any(item.evidence_type == "structure" for item in inscriptions)
+    for evidence in inscriptions:
+        written = evidence.content_data.get("written_content")
+        assert written and written["passages"]
+        minimum_passages = 5 if evidence.subtype == "ruler_tomb" else 8
+        assert len(written["passages"]) >= minimum_passages
+        assert all(marker not in "".join(
+            passage["text"] for passage in written["passages"])
+            for marker in ("碑面刻称", "刻文称", "正面大字刻称"))
+        assert is_public_inscription(evidence)
+        preview = preview_public_inscription(evidence, {"common"})
+        assert preview["status"] == "readable"
+        assert preview["text"]
+        assert preview["text"] == read_document(
+            evidence, {"common"})["visible_passages"][0]
+
+
+def test_public_inscription_preview_respects_unknown_language():
+    world = World(seed=42)
+    world.generate(years=0)
+    inscription = next(
+        evidence for evidence in world.evidence.values()
+        if is_public_inscription(evidence))
+
+    preview = preview_public_inscription(inscription, set())
+
+    assert preview["status"] == "unknown_language"
+    assert "不能判断这些句子是什么意思" in preview["text"]
 
 
 def test_document_reading_respects_language_and_is_deterministic():
@@ -166,6 +216,7 @@ def test_document_reading_respects_language_and_is_deterministic():
         evidence for evidence in world.evidence.values()
         if evidence.material == "parchment" and evidence.state != "destroyed"
     )
+    materialize_text_carrier(world, document.id)
 
     unknown = read_document(document, set())
     assert unknown["status"] == "unknown_language"
@@ -176,7 +227,8 @@ def test_document_reading_respects_language_and_is_deterministic():
     assert first == second
     assert first["status"] == "readable"
     assert first["visible_passages"]
-    assert "仍需与其他证据相互核对" in first["text"]
+    assert "仍需与其他证据相互核对" not in first["text"]
+    assert "这些是文书留下的原话" not in first["text"]
 
 
 def test_damage_reduces_the_amount_of_readable_text():
@@ -186,6 +238,7 @@ def test_damage_reduces_the_amount_of_readable_text():
         evidence for evidence in world.evidence.values()
         if evidence.material == "parchment"
     )
+    materialize_text_carrier(world, document.id)
     document.physical_features["tags"] = [
         tag for tag in document.physical_features["tags"]
         if not tag.startswith("legibility:")
@@ -200,11 +253,8 @@ def test_damage_reduces_the_amount_of_readable_text():
 
     intact_result = read_document(intact, {"common"})
     ruined_result = read_document(ruined, {"common"})
-    intact_chars = sum(len(text.replace("……", ""))
-                       for text in intact_result["visible_passages"])
-    ruined_chars = sum(len(text.replace("……", ""))
-                       for text in ruined_result["visible_passages"])
-    assert ruined_chars < intact_chars
+    assert ruined_result["readability"] < intact_result["readability"]
+    assert any("〔" in text for text in ruined_result["visible_passages"])
 
 
 def test_read_requires_examination_and_does_not_confirm_event(capsys):
@@ -233,6 +283,7 @@ def test_read_requires_examination_and_does_not_confirm_event(capsys):
     capsys.readouterr()
     repl.cmd_read(str(document_index))
     output = capsys.readouterr().out
-    assert "这些是文书留下的原话" in output
+    assert "可辨文字" in output
+    assert "这些是文书留下的原话" not in output
     assert document.id in repl.read_evidence
     assert repl.known_events == set()

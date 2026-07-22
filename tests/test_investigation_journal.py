@@ -10,6 +10,7 @@ from game.investigation import (
 from game.knowledge import PlayerKnowledge
 from game.repl import GameREPL
 from narrative.document_reader import read_document
+from simulation.text_carriers import materialize_text_carrier
 from simulation.world import World
 
 
@@ -54,6 +55,7 @@ def test_reading_persists_visible_text_and_sourced_statements(capsys):
     repl.known_languages.add(record.language_code)
     repl.examined_evidence.add(evidence.id)
 
+    materialize_text_carrier(world, evidence.id)
     expected = read_document(evidence, repl.known_languages)
     repl.cmd_read(str(index))
     capsys.readouterr()

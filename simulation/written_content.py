@@ -15,6 +15,28 @@ BUILDING_NAMES = {
     "palace": "领主大厅",
 }
 
+PERSON_ROLE_NAMES = {
+    "founder": "建城者",
+    "ruler": "统治者",
+    "general": "军队指挥者",
+    "rebel_leader": "反抗领袖",
+    "diplomat": "外交使者",
+    "scholar": "研究者",
+    "writer": "作者",
+    "heir": "继承人",
+}
+
+
+# These carriers display large, exposed lettering rather than text hidden in a
+# book, drawer, or small object.  Their wording is still a source claim, not
+# simulation truth.
+PUBLIC_INSCRIPTION_SUBTYPES = frozenset({
+    "foundation_stone",
+    "treaty_tablet",
+    "treaty_pillar",
+    "ruler_tomb",
+})
+
 
 def _stable_choice(seed: int, evidence_id: str, key: str,
                    options: list[str]) -> str:
@@ -25,6 +47,14 @@ def _stable_choice(seed: int, evidence_id: str, key: str,
 
 def _passage(kind: str, text: str) -> dict:
     return {"kind": kind, "text": text}
+
+
+def _year_label(year: int | str | None) -> str:
+    if isinstance(year, int) and year < 0:
+        return f"纪元前{-year}年"
+    if year is None:
+        return "年份不详"
+    return f"{year}年"
 
 
 def _generic_passages(event, subtype: str, seed: int,
@@ -52,7 +82,9 @@ def _generic_passages(event, subtype: str, seed: int,
 
 
 def _literary_passages(seed: int, document_key: str, work_title: str,
-                       author: str, genre: str) -> list[dict]:
+                       author: str, genre: str,
+                       context: dict | None = None) -> list[dict]:
+    context = context or {}
     motifs = {
         "epic": ["城门", "远征", "失落的旗帜", "归乡者"],
         "drama": ["空置的座位", "两份相反的证词", "未拆的封印", "夜间钟声"],
@@ -94,74 +126,182 @@ def _literary_passages(seed: int, document_key: str, work_title: str,
     def choose(key: str, options: list[str]) -> str:
         return _stable_choice(seed, document_key, key, options)
 
+    setting_name = context.get("setting_name", "这座城镇")
+    creation_year = context.get("creation_year", "不详")
+    sources = [
+        source for source in context.get("literary_sources", [])
+        if isinstance(source, dict)
+    ][:3]
+    source_people = [
+        name for source in sources
+        for name in source.get("person_names", [])
+        if isinstance(name, str) and name
+    ]
+    protagonist = source_people[0] if source_people else witness
+
+    def historical_passages(style: str) -> list[dict]:
+        if not sources:
+            return [_passage(
+                "body",
+                f"故事写于第{creation_year}年，背景放在{setting_name}。"
+                "作者没有说明它对应哪一件具体往事。",
+            )]
+        passages = []
+        for source in sources:
+            source_year = source.get("year", "年份不详")
+            title = source.get("title", "一件当地旧事")
+            summary = source.get("summary", title)
+            if style == "drama":
+                text = (
+                    f"〔故事背景：{source_year}年，{setting_name}发生了"
+                    f"“{title}”。当时的记录写道：{summary}〕"
+                )
+            elif style == "chronicle":
+                text = f"{source_year}年：{title}。档案记录：{summary}"
+            elif style == "lyric":
+                text = (
+                    f"写给{source_year}年的{setting_name}：那一年，人们经历了"
+                    f"“{title}”。记录里这样写：{summary}"
+                )
+            else:
+                text = (
+                    f"故事从{source_year}年的{setting_name}讲起。当地人把那件事"
+                    f"称为“{title}”，留存的记录写道：{summary}"
+                )
+            passages.append(_passage("body", text))
+        return passages
+
     if genre == "drama":
         body = [
-            _passage("body", f"人物：{witness}、归来的使者、抄写员、{absent}的亲属与两名轮值市民。"),
-            _passage("body", f"第一场：{weather}。{setting}下，众人围绕{motif}争论{dispute}。"),
-            _passage("body", f"{witness}：我只听见{sound}，没有看见是谁先越过门槛。"),
-            _passage("body", f"使者展示{keepsake}，却拒绝说明它是在路上拾得还是受人托付。"),
-            _passage("body", "抄写员把证词分写在两块板上，说并列不等于赞同其中任何一方。"),
-            _passage("body", f"亲属念出{absent}留下的半句话，末尾被观众席的争吵盖过。"),
-            _passage("body", f"第二场：{choose('drama_signal', ['城门落锁', '灯芯熄灭', '鼓手漏了一拍', '雨水浸过台阶'])}。两名市民给出相反的先后次序。"),
-            _passage("body", f"第一市民追问：{choose('drama_question', ['若记忆会变，为何还要重演', '若印记可信，为何落款不同', '若无人认领，物件是否仍有主人', '若两人都诚实，矛盾从何而来'])}？"),
-            _passage("body", f"第二市民回答：{choose('drama_answer', ['让不同的人轮流说出所见', '把无法确认的地方留白', '先保存争议，再讨论裁断', '不要替沉默者补写姓名'])}。"),
-            _passage("body", f"第三场：旧卷被朗读时，台上人物逐句补入{choose('drama_omission', ['伤者与搬运者', '守夜者与烧饭人', '失踪者与临时工匠', '债主与未领报酬者'])}。"),
-            _passage("body", f"{witness}把{keepsake}放到桌面中央，请下一位保管者先写下自己不知道的事。"),
-            _passage("body", f"末场：{sound}再次响起，物件、证词和空白名册仍并排放着；幕布在裁断前落下。"),
+            *historical_passages("drama"),
+            _passage("body", f"人物：{protagonist}、{witness}、一名抄写员、{absent}的亲属，以及两名当晚值班的市民。"),
+            _passage("body", f"〔第一场。{weather}，地点是{setting}。一盏灯放在{motif}旁边，所有人围着桌子站着。〕"),
+            _passage("body", f"{witness}：我听见了{sound}，但我没看清是谁先走进来。"),
+            _passage("body", f"{protagonist}〔举起{keepsake}〕：东西在这里。它是捡来的，还是别人托我保管的，我不能替不在场的人回答。"),
+            _passage("body", "抄写员：我会把两份证词都记下来。写在同一页上，不代表它们说的是同一回事。"),
+            _passage("body", f"亲属：{absent}只留下半句话：“门打开以后，请把我的……”〔争吵声盖住了最后几个字。〕"),
+            _passage("body", f"〔第二场。{choose('drama_signal', ['城门关上了', '灯芯突然灭了', '鼓手漏了一拍', '雨水漫过台阶'])}。两名市民从相反方向走进来。〕"),
+            _passage("body", f"第一位市民：{choose('drama_question', ['如果记忆会变，我们为什么还要重演这件事', '如果印记可靠，为什么两份文件的落款不同', '如果没人认领，这件东西还算有主人吗', '如果两个人都没有说谎，矛盾到底从哪里来'])}？"),
+            _passage("body", f"第二位市民：{choose('drama_answer', ['让每个人轮流说出自己看到的部分', '无法确认的地方就先空着', '先保存争议，再讨论怎么判断', '不要替沉默的人补写姓名'])}。"),
+            _passage("body", f"〔第三场。抄写员打开旧卷。大家每读一行，就补上一名{choose('drama_omission', ['伤者或搬运者', '守夜人或做饭的人', '失踪者或临时工匠', '债主或没拿到报酬的人'])}。〕"),
+            _passage("body", f"{witness}〔把{keepsake}放在桌子中央〕：下一个保管它的人，应该先写清楚自己不知道什么。"),
+            _passage("body", f"{protagonist}：那该由谁来判断？ 抄写员：等到“{dispute}”不再只有一个答案时，我们再谈判断。"),
+            _passage("body", f"〔{sound}再次响起。物件、两份证词和空白名册都留在灯下。幕落。〕"),
         ]
     elif genre == "chronicle":
         body = [
-            _passage("body", f"序：编者把{choose('chron_sources', ['旧账、碑铭与口述', '税册、墓记与家谱', '工匠名录、路标与残信', '庭审笔记、仓单与歌谣'])}按年排列，互相冲突者并列保存。"),
-            _passage("body", f"第一卷追索{motif}附近的街巷、水道和旧称，并标出{choose('chron_boundary', ['三段有争议的边界', '两条已经改道的沟渠', '一处反复易名的广场', '四座只存于口述的门楼'])}。"),
-            _passage("body", f"{witness}在{setting}重新核线，发现{choose('chron_mismatch', ['界石方位与账册不合', '道路宽度比旧图少半步', '两册地租簿使用不同地名', '桥墩上的年份被后刻覆盖'])}。"),
-            _passage("body", f"第二卷抄录{choose('chron_economy', ['歉收、征收与粮价', '工钱、木料与盐价', '渡税、车数与仓耗', '种量、雨日与磨坊产量'])}，所有互异数字均未删去。"),
-            _passage("body", f"同卷附有{choose('chron_witnesses', ['磨坊主、佃户和税吏', '船夫、商人和门吏', '医者、掘墓人和祭司', '石匠、书记和守夜人'])}的说法；编者拒绝把它们合成一个数字。"),
-            _passage("body", f"第三卷列出{choose('chron_works', ['城门修缮与负责工匠', '水渠清淤与轮值劳工', '市场迁建与摊位编号', '粮仓扩建与木料来源'])}。"),
-            _passage("body", f"名录旁夹着一张关于{keepsake}的领物单，领取者可能是{absent}。"),
-            _passage("body", f"第四卷并列{choose('chron_conflict', ['两份战争报告', '三份继承告示', '一份判词与两份证词', '官署清册和商会账簿'])}，没有删去相互冲突的句子。"),
-            _passage("body", f"附录只收录由{choose('chron_confirm', ['两名见证者', '一份账册和一处碑记', '三个互不相识的讲述者', '原件与早期抄本'])}共同确认的姓名，其余另列待考。"),
-            _passage("body", f"第五卷记录{choose('chron_daily', ['节庆、婚约与诉讼', '迁居、借贷与学徒契约', '井水分配与夜间巡逻', '丧葬、集市与儿童歌谣'])}中普通居民留下的短句。"),
-            _passage("body", f"第六卷解释{sound}为何在不同城区被赋予不同含义，并保留旧称。"),
-            _passage("body", f"末卷列出依据：{choose('chron_counts', ['七册账簿、四方碑铭与两封残信', '五卷税册、九次口述与一张旧图', '三本名录、六块木牌与十一则证词', '八份仓单、两座墓记与四首旧歌'])}。"),
-            _passage("body", f"编者说明：关于{dispute}的缺失年份一律留白，不以推测补齐。"),
+            _passage(
+                "body",
+                f"{author}于{creation_year}年在{setting_name}编定此书。",
+            ),
         ]
+        if sources:
+            for source in sources:
+                body.extend([
+                    _passage(
+                        "body",
+                        f"{source.get('year', '年份不详')}年，"
+                        f"{source.get('title', '一件当地事件')}。",
+                    ),
+                    _passage(
+                        "body",
+                        source.get("summary", source.get("title", "记录不详")),
+                    ),
+                ])
+        else:
+            body.append(_passage(
+                "body",
+                f"关于{setting_name}早年的篇章已经散失。",
+            ))
+    elif genre == "biography":
+        subject_name = context.get("biography_subject_name", "传主姓名不详")
+        birth_year = context.get("biography_subject_birth_year")
+        death_year = context.get("biography_subject_death_year")
+        roles = context.get("biography_subject_roles", [])
+        life_range = (
+            f"生于{_year_label(birth_year)}，卒于{_year_label(death_year)}"
+            if birth_year is not None and death_year is not None
+            else f"生于{_year_label(birth_year)}，成书时仍在世"
+            if birth_year is not None
+            else "生卒年份未能确认"
+        )
+        role_text = "、".join(
+            PERSON_ROLE_NAMES.get(role, role) for role in roles
+        ) if roles else "身份记录不完整"
+        body = [
+            _passage("body", f"{subject_name}{life_range}，一生与{setting_name}相连。"),
+            _passage("body", f"{subject_name}曾为{role_text}。"),
+        ]
+        if sources:
+            for source in sources:
+                role = source.get("subject_role", "事件参与者")
+                others = [
+                    name for name in source.get("person_names", [])
+                    if name != subject_name
+                ]
+                others_text = "、".join(others)
+                others_sentence = (
+                    f"当时与此事相关的还有{others_text}。"
+                    if others_text else ""
+                )
+                body.extend([
+                    _passage(
+                        "body",
+                        f"{source.get('year', '年份不详')}年，{subject_name}以{role}的身份参与了"
+                        f"{source.get('title', '一件有其参与的事件')}。",
+                    ),
+                    _passage(
+                        "body",
+                        source.get("summary", source.get("title", "记录不详")),
+                    ),
+                ])
+                if others_sentence:
+                    body.append(_passage("body", others_sentence))
+        else:
+            body.append(_passage(
+                "body", f"{subject_name}其余生平已经失传。"))
     elif genre == "lyric_cycle":
         body = [
-            _passage("body", f"其一：{motif}映着{choose('lyric_light', ['清晨的浅光', '雨前的暗云', '迟来的月色', '炉火的红光'])}，最先醒来的人没有留下姓名。"),
-            _passage("body", f"其二：{weather}，风越过{setting}，把尘土带进一封未写完的信。"),
-            _passage("body", f"其三：孩子拾到{keepsake}，问{witness}它为何比故事中的名字更长久。"),
-            _passage("body", f"其四：{choose('lyric_market', ['集市散去', '渡船离岸', '祭仪结束', '粮仓封门'])}以后，秤盘仍在衡量无人认领的承诺。"),
-            _passage("body", f"其五：归人摸到{choose('lyric_mark', ['门上的旧凿痕', '井沿的绳槽', '桥栏的刀痕', '石阶的车辙'])}，却认不出后来刻上的新字。"),
-            _passage("body", f"其六：有人伴着{sound}重复一首歌，每唱一遍便少一个名字，多一处停顿。"),
-            _passage("body", f"其七：{choose('lyric_depth', ['井绳', '河湾', '空罐', '地窖石阶'])}把昨夜的回声送回更深的地方。"),
-            _passage("body", f"其八：{choose('lyric_crop', ['麦穗低头', '芦苇弯腰', '果枝触地', '苔藓伏在碑面'])}不是因为认罪，而是风从所有方向经过。"),
-            _passage("body", f"其九：{absent}没有归来，旧屋的门槛仍按同样的位置磨损。"),
-            _passage("body", f"其十：道路向{choose('lyric_roads', ['山口与河谷', '旧城与新田', '港湾与高地', '墓园与市场'])}延伸，离去与归来共用一块路标。"),
-            _passage("body", f"其十一：歌者把关于{dispute}的最后一节交给听众，不规定悲伤或庆贺。"),
-            _passage("body", f"尾声：抄写者在{choose('lyric_blank', ['末行', '页边', '两节之间', '题名之后'])}留出空白，供后来者续写。"),
+            *historical_passages("lyric"),
+            _passage("body", f"第一首：{motif}映着{choose('lyric_light', ['清晨的微光', '下雨前的暗云', '很晚才出现的月光', '炉火的红光'])}。最早醒来的人没有留下姓名。"),
+            _passage("body", f"第二首：{weather}。风吹过{setting}，把灰尘带进一封没写完的信。"),
+            _passage("body", f"第三首：孩子捡到{keepsake}，问{witness}，为什么一件旧东西比故事里的人名保存得更久。"),
+            _passage("body", f"第四首：{choose('lyric_market', ['集市散场', '渡船离岸', '仪式结束', '粮仓关门'])}以后，秤盘还在轻轻摇晃，但已经没有人在旁边争论。"),
+            _passage("body", f"第五首：回家的人摸到{choose('lyric_mark', ['门上的旧凿痕', '井边被绳子磨出的沟槽', '桥栏上的刀痕', '石阶上的车辙'])}，却看不懂后来刻上去的新字。"),
+            _passage("body", f"第六首：有人伴着{sound}反复唱一首歌。每唱一次，就少一个名字，多一次停顿。"),
+            _passage("body", f"第七首：{choose('lyric_depth', ['井绳', '河湾', '空罐', '通往地窖的石阶'])}把昨晚的回声带到更深的地方。"),
+            _passage("body", f"第八首：{choose('lyric_crop', ['麦穗低下去', '芦苇弯下来', '果枝碰到地面', '苔藓盖住碑面'])}，只是因为风从每个方向吹过。"),
+            _passage("body", f"第九首：{absent}没有回来，旧屋门槛上的磨损却还在原来的位置。"),
+            _passage("body", f"第十首：道路通向{choose('lyric_roads', ['山口和河谷', '旧城和新田', '港湾和高地', '墓园和市场'])}。离开的人和回来的人看的是同一块路牌。"),
+            _passage("body", f"第十一首：最后一节问的是“{dispute}”。歌者没有告诉听众应该悲伤还是庆祝。"),
+            _passage("body", f"尾声：抄写者在{choose('lyric_blank', ['最后一行', '页边', '两首诗之间', '标题后面'])}留下一块空白，希望后来的人能接着写。"),
         ]
     else:
         body = [
-            _passage("body", f"开篇：歌者在{setting}请求听众记住{motif}，并暂缓判断{dispute}。"),
-            _passage("body", f"第一歌讲述队伍离城时携带{choose('epic_supplies', ['井水、烤谷与三面旗帜', '盐肉、绳索与两架空车', '药草、干柴与一只铜号', '种子、铁锹与四卷地图'])}。"),
-            _passage("body", f"{weather}，年长向导凭{choose('epic_old_route', ['星位', '旧界石', '树皮风向', '驮兽脚印'])}辨路，年轻向导却相信{choose('epic_new_route', ['河声', '新绘地图', '商队传言', '山顶烟迹'])}。"),
-            _passage("body", f"第二歌列出{choose('epic_places', ['渡口、山隘和废井', '盐道、牧场和旧营地', '石桥、密林和边界塔', '浅滩、坡田和烧毁村舍'])}使用的不同地名。"),
-            _passage("body", f"负伤者把{keepsake}交给{witness}，请其只转交物件，不替自己编造遗言。"),
-            _passage("body", f"第三歌写两位首领对{choose('epic_oath', ['同一誓言', '撤退命令', '分粮规则', '俘虏交换'])}作出相反解释。"),
-            _passage("body", f"队伍分成两列，却仍{choose('epic_shared', ['从同一口锅取食', '共用最后一捆柴', '轮换照料伤员', '在同一张图上标路'])}。"),
-            _passage("body", f"第四歌不写胜负，只按{choose('epic_order', ['担架抵门', '号角停响', '旗帜归还', '医者点灯'])}的次序记录伤者。"),
-            _passage("body", f"第五歌转述等待者的声音：有人寻找亲属，有人询问{choose('epic_debt', ['借出的工具', '未付的工钱', '托带的信件', '无人照料的田地'])}。"),
-            _passage("body", f"幸存者归乡时发现{choose('epic_change', ['街道已经换名', '城门改了方向', '旧井被石板封住', '市场迁到河岸'])}。"),
-            _passage("body", f"第六歌让三位归人分别讲述{sound}响起时的方位；三段叙述互不相合。"),
-            _passage("body", f"尾声之前，歌者念出能够确认的姓名，并为{absent}保留一段停顿。"),
-            _passage("body", f"终歌要求听众在下一次吟诵中重新讨论{dispute}，不得把空白当作答案。"),
+            *historical_passages("epic"),
+            _passage("body", f"故事开始时，{protagonist}站在{setting}，望着{motif}。大家决定先听完所有归来者的话，再讨论{dispute}。"),
+            _passage("body", f"城门初开，队伍肩负{choose('epic_supplies', ['井水、烤谷与三面旗帜', '盐肉、绳索与两架空车', '药草、干柴与一只铜号', '种子、铁锹与四卷地图'])}；母亲们数脚步，不数号角。"),
+            _passage("body", f"{weather}。年长的向导根据{choose('epic_old_route', ['星星的位置', '旧界石', '树皮显示的风向', '驮兽留下的脚印'])}认路，年轻向导更相信{choose('epic_new_route', ['河水的声音', '新画的地图', '商队带来的消息', '山顶的烟迹'])}。"),
+            _passage("body", f"过河的人把对岸叫作{choose('epic_places', ['三石渡，山里人却叫那里废井口', '旧盐道，牧人却叫那里白草坡', '断桥地，守塔人却叫那里东界', '浅滩口，种田的人却叫那里烧村路'])}。地图只能写下一个名字，生活在那里的人却记得两个。"),
+            _passage("body", f"一名伤者把{keepsake}交给{witness}，让他只转交东西，不要替自己编一段遗言。"),
+            _passage("body", f"两位带队者围着同一堆火争论{choose('epic_oath', ['同一份誓言', '撤退命令', '分粮规则', '交换俘虏的办法'])}。一个人认为承诺不能改，另一个人认为紧急时应该先救人。"),
+            _passage("body", f"队伍后来分成两列，但大家仍然{choose('epic_shared', ['从同一口锅里取食物', '共用最后一捆柴', '轮流照顾伤员', '在同一张地图上标路'])}。"),
+            _passage("body", f"城门边的人没有先问旗帜插在哪里，而是按照{choose('epic_order', ['担架进门', '号角停下', '旗帜交还', '医师点灯'])}的顺序，登记伤者的名字。"),
+            _passage("body", f"等候的人涌向归来的队伍。有人寻找亲属，有人追问{choose('epic_debt', ['借出去的工具', '还没支付的工钱', '托人带走的信', '没人照看的田地'])}，很少有人只问输赢。"),
+            _passage("body", f"幸存者回家以后才发现，{choose('epic_change', ['街道已经换了名字', '城门改了方向', '旧井被石板封住', '市场搬到了河边'])}。"),
+            _passage("body", f"第一个回来的人说{sound}来自东坡，第二个人指向河谷，第三个人低声说：“我只听见自己的喘气声。”"),
+            _passage("body", f"歌者读出能够确认的姓名。读到{absent}时，他停下来，让大家知道这个名字仍然没有答案。"),
+            _passage("body", f"故事结束时，人们仍在讨论{dispute}。作者没有替任何一方宣布胜利。"),
         ]
-    return [
+    passages = [
         _passage("heading", f"《{work_title}》"),
         _passage("attribution", f"作者：{author}。"),
         *body,
-        _passage("closing", "抄本校记：断句与异文见页边小字。"),
     ]
+    if genre not in {"chronicle", "biography"}:
+        passages.append(_passage(
+            "closing", "抄本校记：断句与异文见页边小字。"))
+    return passages
 
 
 def _theoretical_passages(seed: int, document_key: str, work_title: str,
@@ -262,7 +402,31 @@ def build_written_content(event, subtype: str, seed: int,
     year = event.year
     passages: list[dict]
 
-    if base_subtype == "founding_charter":
+    if base_subtype == "foundation_stone":
+        founder = details.get("founder", "诸位立约者")
+        settlement = details.get("settlement_name", "此地")
+        boundary = _stable_choice(seed, document_key, "foundation_boundary", [
+            "东至双柳，西至浅滩，南至黑石，北至旧坡",
+            "以井心为中，向四方各量三百步",
+            "从河湾界石起，沿旧兽道直到北坡",
+        ])
+        witnesses = _stable_choice(seed, document_key, "foundation_witnesses", [
+            "掘井者、筑路者与最早搭屋的七户",
+            "石匠、引水人、守夜者与分种者",
+            "携火者、掌秤者、渡河者与三名无印见证人",
+        ])
+        passages = [
+            _passage("heading", f"{settlement}奠基铭"),
+            _passage("body", f"第{year}年，{founder}与同行诸户在此下第一石，立名为{settlement}。"),
+            _passage("body", f"此地之界：{boundary}；界外旧路与流水不得据为私有。"),
+            _passage("body", "先掘井，后筑门；先留通路，后分屋地。任何一户不得封断众人取水之径。"),
+            _passage("body", "外田依劳力分耕，荒年共留种谷；仓中公粮须由两人同启封记。"),
+            _passage("body", "争界者先请相邻者陈说，再验界石与旧沟；未明之处不得趁夜移石。"),
+            _passage("body", "来居者守此约者得用道路与水井，离去者所负公债仍记于木册。"),
+            _passage("body", f"在场见证：{witnesses}。异议可刻于石背，不得凿去正面旧字。"),
+            _passage("closing", "愿后来者修井、补路、重认界线，也保留未能同意之人的名字。"),
+        ]
+    elif base_subtype == "founding_charter":
         founder = details.get("founder", "诸位立约者")
         settlement = details.get("settlement_name", "此地")
         grant = _stable_choice(seed, document_key, "charter_grant", [
@@ -297,6 +461,19 @@ def build_written_content(event, subtype: str, seed: int,
             details.get("work_title", "无题文稿"),
             details.get("author_name", "佚名"),
             details.get("genre", "epic"),
+            {
+                "creation_year": year,
+                "setting_name": details.get("setting_name", "这座城镇"),
+                "literary_sources": details.get("literary_sources", []),
+                "biography_subject_name": details.get(
+                    "biography_subject_name", "传主姓名不详"),
+                "biography_subject_birth_year": details.get(
+                    "biography_subject_birth_year"),
+                "biography_subject_death_year": details.get(
+                    "biography_subject_death_year"),
+                "biography_subject_roles": details.get(
+                    "biography_subject_roles", []),
+            },
         )
         if base_subtype == "traveling_literary_copy":
             passages.append(_passage(
@@ -305,6 +482,10 @@ def build_written_content(event, subtype: str, seed: int,
                 "个别词句依当地读法改写。"))
     elif base_subtype == "literary_commentary":
         title = details.get("work_title", "无题文稿")
+        literary_sources = [
+            source for source in details.get("literary_sources", [])
+            if isinstance(source, dict)
+        ][:3]
         opening_issue = _stable_choice(seed, document_key, "commentary_opening", [
             "开篇地名有两种写法", "开篇人物在晚期本中多出一个称号",
             "首节的两行在不同抄本中次序相反", "题名下的作者署名使用了较新的字形",
@@ -317,16 +498,36 @@ def build_written_content(event, subtype: str, seed: int,
             "某些人物可能由多人合并而成", "同一称号可能先后属于不同人物",
             "叙述者可能把两次旅程写成一次", "作品中的城市可能混合了数处地貌",
         ])
+        historical_notes = []
+        for index, source in enumerate(literary_sources, start=1):
+            historical_notes.extend([
+                _passage(
+                    "body",
+                    f"历史对照{index}：作品取材于第{source.get('year', '年份不详')}年"
+                    f"的“{source.get('title', '一件当地旧事')}”。",
+                ),
+                _passage(
+                    "body",
+                    f"同期档案写道：{source.get('summary', source.get('title', '记录不详'))}",
+                ),
+            ])
+        if not historical_notes:
+            historical_notes.append(_passage(
+                "body",
+                "历史对照：这份旧校注没有注明作品取材于哪些事件，暂时无法与本地档案逐条对应。",
+            ))
         passages = [
-            _passage("heading", f"《{title}》边注与异文"),
-            _passage("body", f"第一条：现存抄本的{opening_issue}，无法仅凭字形决定孰早。"),
-            _passage("body", f"第二条：{performance_note}，不宜立即判为抄写错误。"),
+            _passage("heading", f"《{title}》校注与版本差异"),
+            _passage("body", "校者据现存抄本与本地档案，将异文列在下面。"),
+            *historical_notes,
+            _passage("body", f"版本记录一：现存抄本的{opening_issue}。只看字形还不能判断哪一种写法更早。"),
+            _passage("body", f"版本记录二：{performance_note}，因此不能马上把它当成抄写错误。"),
             _passage("body", f"第三条：作品使用的{_stable_choice(seed, document_key, 'commentary_terms', ['统治者称号', '地租名称', '城门方位词', '亲属称谓'])}与同时代文书并不完全一致。"),
-            _passage("body", f"第四条：{composite}；校者暂未替这些形象指定原型。"),
+            _passage("body", f"第四条：{composite}。现有材料不足以确认每个文学形象对应哪位真人或哪个地点。"),
             _passage("body", f"第五条：较晚抄本增加了关于{_stable_choice(seed, document_key, 'commentary_late', ['战争结局', '继承次序', '远征路线', '祭仪起源'])}的解释，早期本没有此句。"),
             _passage("body", f"第六条：{_stable_choice(seed, document_key, 'commentary_cut', ['节庆表演本删去地理描写', '商旅传抄本缩短人物对话', '神庙藏本改写了誓言', '学徒抄本省略重复歌节'])}，但保留了前后的转折词。"),
             _passage("body", f"第七条：不能把{_stable_choice(seed, document_key, 'commentary_voice', ['角色发言', '合唱段落', '编者按语', '抄写者补句'])}直接视为作者本人的判断。"),
-            _passage("closing", "校者按语：以上仅记录文本差异，不裁定作品所述事件是否真实。"),
+            _passage("closing", "以上异文暂录于此，待见其他抄本再订。"),
         ]
     elif base_subtype == "theoretical_treatise":
         passages = _theoretical_passages(
@@ -351,31 +552,60 @@ def build_written_content(event, subtype: str, seed: int,
         ]
     elif base_subtype == "research_notes":
         discovery = details.get("discovery_name", event.title)
-        materials = _stable_choice(seed, document_key, "research_materials", [
-            "硬木、铜钉、麻绳与配重", "黏土、炭粉、细砂与封泥",
-            "药草、净水、布条与陶罐", "石料、木轴、铁箍与油脂",
-            "种粒、土样、灰肥与量斗", "玻璃片、刻尺、灯油与黑布",
-        ])
-        first_failure = _stable_choice(seed, document_key, "research_failure", [
-            "连接处在承受负载后松脱", "样品冷却后出现裂纹",
-            "读数在第三次操作时明显偏移", "潮湿材料使试验无法复现",
-            "对照组的结果反而更稳定", "封口在一夜后失去气密",
-        ])
-        revision = _stable_choice(seed, document_key, "research_revision", [
-            "缩短尺寸并加固边缘", "更换材料来源并重新称量",
-            "调换步骤次序", "增加一组未经处理的对照",
-            "把操作人数减为两人", "延长静置时间并遮挡风口",
-        ])
-        passages = [
-            _passage("heading", f"关于“{discovery}”的试验札记"),
-            _passage("body", details.get("description_cn", "本页记录了数次观察与试验。")),
-            _passage("body", f"材料表：本轮使用{materials}，每批来源与重量分别登记。"),
-            _passage("body", f"第一次试制失败：{first_failure}。失败样品没有丢弃。"),
-            _passage("body", f"第二次试制选择{revision}，结果可以重复，但仍有一项读数不稳定。"),
-            _passage("body", f"第三次试制由{_stable_choice(seed, document_key, 'research_replicator', ['另一组工匠', '两名学徒', '未参加设计的书记', '外地来访者'])}独立完成，主要趋势相近。"),
-            _passage("body", f"书记保留{_stable_choice(seed, document_key, 'research_archive', ['失败草图', '破裂样品', '原始计数板', '被否决的尺寸表'])}，以区分必要结构和偶然改动。"),
-            _passage("closing", "目前只能确认样品能够重复制成；长期效果仍需继续记录。"),
-        ]
+        process = details.get("research_process")
+        if isinstance(process, dict) and process.get("attempts"):
+            materials = "、".join(process.get("materials", [])) or "材料未详"
+            attempts = process["attempts"]
+            passages = [
+                _passage("heading", f"关于“{discovery}”的试验札记"),
+                _passage(
+                    "body",
+                    f"研究从第{process.get('started_year', year)}年开始，"
+                    f"在第{process.get('completed_year', year)}年形成可重复结果。"
+                    f"负责人为{process.get('lead_researcher_name', '未署名研究者')}。",
+                ),
+                _passage("body", f"材料表：{materials}。各批材料的来源和状态分别登记。"),
+            ]
+            for attempt in attempts:
+                number = attempt.get("attempt_number", "?")
+                attempt_year = attempt.get("year", "年份不详")
+                stage = attempt.get("stage", "试制")
+                result = attempt.get("result")
+                observation = attempt.get("observation", "没有留下观察结果")
+                prefix = f"第{number}次试制（第{attempt_year}年，{stage}）"
+                if result == "repeatable_success":
+                    text = f"{prefix}：{observation}。本轮结果能够重复。"
+                elif result == "partial_success":
+                    change = attempt.get("change_for_next_attempt", "继续调整结构")
+                    text = (
+                        f"{prefix}：{observation}。本轮只达到部分要求，"
+                        f"下一轮决定{change}。"
+                    )
+                else:
+                    change = attempt.get("change_for_next_attempt", "重新检查设计")
+                    text = (
+                        f"{prefix}：{observation}。本轮没有达到要求，"
+                        f"随后决定{change}。"
+                    )
+                passages.append(_passage("body", text))
+            passages.append(_passage(
+                "closing",
+                f"结论：共记录{process.get('attempt_count', len(attempts))}次试制。"
+                "最后一次结果可以由其他工匠按同样步骤复现；长期使用效果仍需继续记录。",
+            ))
+        else:
+            passages = [
+                _passage("heading", f"关于“{discovery}”的试验札记"),
+                _passage(
+                    "body",
+                    details.get("description_cn", "本页说明该技术已经形成可重复样品。"),
+                ),
+                _passage(
+                    "body",
+                    "试制详页已经散失，只剩写有最终结果的末页。",
+                ),
+                _passage("closing", "前序页数与装订次序均已不可考。"),
+            ]
     elif base_subtype == "reconstruction_account":
         building = details.get("building_name", "受损设施")
         passages = [
@@ -408,6 +638,70 @@ def build_written_content(event, subtype: str, seed: int,
             ])),
             _passage("closing", "接收者与运送者的印记并列于页脚。"),
         ]
+    elif base_subtype in {"treaty_tablet", "treaty_pillar"}:
+        treaty_type = details.get("treaty_type", "agreement")
+        opening = {
+            "peace": "自今日落日后，双方收弓止矛，不越既守之界。",
+            "alliance": "自今日起，双方以烽火与使者互报危急，不匿来敌。",
+        }.get(
+            treaty_type,
+            "立约双方在共同见证者之前列明所诺，异议另刻，不涂旧文。")
+        exchange = _stable_choice(seed, document_key, "treaty_exchange", [
+            "被留的使者须在十日内送还，随身印记与书信一并点交",
+            "遗留的旗、车与工具各归原持有者，不能辨认者封存待验",
+            "俘者与失散平民按名册交换，无名者由两地见证人共同辨认",
+        ])
+        passages = [
+            _passage("heading", event.title),
+            _passage("body", f"第{year}年，双方使者在此石前交换誓词。{opening}"),
+            _passage("body", f"第一条：{exchange}。"),
+            _passage("body", "第二条：商旅持双方所认封记者可循旧路通行；守门人可验货，不得私取。"),
+            _passage("body", "第三条：界石倒伏时，由两方各遣三人同立；一方独立之石不作凭据。"),
+            _passage("body", "第四条：血债、欠粮与毁屋各记一册，已偿与争议分栏，不以总数相抵。"),
+            _passage("body", "第五条：听闻违约者先遣使询问，三日未答方可召集见证者，不得先害来使。"),
+            _passage("body", "左右所列为各方见证名号，中央两处凹槽原置印记；缺名不得由后来者补刻。"),
+            _passage("closing", "每逢约期，双方在此逐条核对。此石记立约人的誓词，不替未到场者作证。"),
+        ]
+    elif base_subtype == "ruler_tomb":
+        old_ruler = details.get("old_ruler", "墓主人")
+        successor = details.get("new_ruler", "继任者")
+        burial_place = details.get("epitaph_location_name", event.title)
+        birth_year = details.get("epitaph_birth_year")
+        death_year = details.get("epitaph_death_year", year)
+        age = details.get("epitaph_age")
+        roles = details.get("epitaph_roles", [])
+        role_text = "、".join(
+            PERSON_ROLE_NAMES.get(role, role) for role in roles)
+        life_sources = [
+            source for source in details.get("epitaph_sources", [])
+            if isinstance(source, dict)
+        ]
+        passages = [
+            _passage("heading", f"{burial_place}的{old_ruler}墓志"),
+            _passage(
+                "body",
+                f"{old_ruler}安葬于{burial_place}。"
+                + (f"生于{_year_label(birth_year)}，卒于{_year_label(death_year)}"
+                   if birth_year is not None else f"卒于{_year_label(death_year)}")
+                + (f"，去世时{age}岁。" if age is not None else "。"),
+            ),
+            _passage(
+                "body",
+                f"{old_ruler}生前曾为{role_text or '此地之主'}。",
+            ),
+        ]
+        for source in life_sources:
+            passages.append(_passage("body", source.get(
+                "summary", source.get("title", "其事已不可考。"))))
+        if not life_sources:
+            passages.append(_passage(
+                "body",
+                f"{old_ruler}其余生平已经失传。",
+            ))
+        passages.extend([
+            _passage("body", f"{old_ruler}去世后，{successor}继任。"),
+            _passage("closing", f"此石立于{_year_label(death_year)}。"),
+        ])
     elif base_subtype == "religious_text":
         refrain = _stable_choice(seed, document_key, "religious_refrain", [
             "守火者应记住来路，也应为后来者留下名字。",
@@ -624,9 +918,16 @@ def build_written_copy_content(source_content: dict, seed: int,
 
     if mode == "lacuna" and target_index is not None:
         source_text = passages[target_index]["text"]
-        visible_start = source_text[:max(8, min(18, len(source_text) // 3))]
+        lacuna_length = max(2, min(8, len(source_text) // 8))
+        available = max(1, len(source_text) - lacuna_length + 1)
+        lacuna_start = int(hashlib.sha256(
+            f"{seed}|{copy_key}|lacuna_start".encode("utf-8")
+        ).hexdigest()[:8], 16) % available
         passages[target_index]["text"] = (
-            f"{visible_start}……〔抄写者注明：所据母本此处缺损〕")
+            source_text[:lacuna_start]
+            + "〔母本此处缺损〕"
+            + source_text[lacuna_start + lacuna_length:]
+        )
     elif mode == "margin":
         passages.append(_passage(
             "marginalia",

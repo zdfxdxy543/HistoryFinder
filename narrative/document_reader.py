@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import re
 
+from simulation.text_carriers import render_damaged_passages
+
 
 STATE_READABILITY = {
     "intact": 1.0,
@@ -98,6 +100,13 @@ def _numbers_and_symbols(text: str, evidence_id: str, passage_index: int,
 def _render_passage(text: str, mode: str, evidence_id: str,
                     passage_index: int, readability: float,
                     kind: str) -> str:
+    if mode == "clear_large_letters":
+        if readability >= 0.75:
+            return text
+        if readability >= 0.4:
+            return _middle_fragment(text, readability)
+        return _isolated_fragments(
+            text, evidence_id, passage_index, readability)
     if mode == "missing_ends":
         return _middle_fragment(text, readability)
     if mode == "numbers_and_symbols":
@@ -111,9 +120,9 @@ def _render_passage(text: str, mode: str, evidence_id: str,
 
 
 def read_document(evidence, known_languages: set[str]) -> dict:
-    """Return a player-safe reading result without consulting source events."""
+    """Read words physically present on a carrier without consulting truth."""
     written = evidence.content_data.get("written_content")
-    if evidence.evidence_type != "document" or not written:
+    if not written:
         return {
             "status": "no_text",
             "text": "这件东西上没有可以连续阅读的书写内容。",
@@ -121,7 +130,7 @@ def read_document(evidence, known_languages: set[str]) -> dict:
     if evidence.state == "destroyed":
         return {
             "status": "destroyed",
-            "text": "这份文书已经损毁，无法再读取。",
+            "text": "这件书写载体已经损毁，无法再读取。",
         }
 
     language_code = written.get("language_code", "unknown")
@@ -131,44 +140,92 @@ def read_document(evidence, known_languages: set[str]) -> dict:
             "status": "unknown_language",
             "language_code": language_code,
             "text": (
-                f"纸面上仍有成列字符，但你不懂{language_name}，"
+                f"载体表面仍有成列字符，但你不懂{language_name}，"
                 "目前只能临摹字形，不能判断这些句子是什么意思。"
             ),
         }
 
     passages = written.get("passages", [])
-    mode = _tag_value(evidence, "legibility", "isolated_glyphs")
-    readability = STATE_READABILITY.get(evidence.state, 0.5)
-    if evidence.max_durability > 0:
-        durability_ratio = max(
-            0.0, min(1.0, evidence.current_durability / evidence.max_durability))
-        readability *= 0.5 + 0.5 * durability_ratio
+    if (int(written.get("format_version", 1))
+            >= 3 and evidence.content_data.get("text_layout")):
+        mode = "persistent_damage_map"
+        visible_passages, readability = render_damaged_passages(evidence)
+    else:
+        mode = _tag_value(evidence, "legibility", "isolated_glyphs")
+        readability = STATE_READABILITY.get(evidence.state, 0.5)
+        if evidence.max_durability > 0:
+            durability_ratio = max(
+                0.0, min(
+                    1.0,
+                    evidence.current_durability / evidence.max_durability))
+            readability *= 0.5 + 0.5 * durability_ratio
 
-    visible_passages = []
-    for index, passage in enumerate(passages):
-        text = passage.get("text", "")
-        if not text:
-            continue
-        rendered = _render_passage(
-            text, mode, evidence.id, index, readability,
-            passage.get("kind", "body"))
-        visible_passages.append(rendered)
+        visible_passages = []
+        for index, passage in enumerate(passages):
+            text = passage.get("text", "")
+            if not text:
+                continue
+            rendered = _render_passage(
+                text, mode, evidence.id, index, readability,
+                passage.get("kind", "body"))
+            visible_passages.append(rendered)
 
+    base_subtype = evidence.subtype.removesuffix("_copy") \
+        if evidence.is_copy_of else evidence.subtype
+    literary_work = base_subtype in {
+        "literary_manuscript", "traveling_literary_copy",
+    }
+    literary_commentary = base_subtype == "literary_commentary"
     if not visible_passages:
         body = "墨迹已经无法组成可辨的句子。"
+    elif literary_work or literary_commentary:
+        body = "\n\n".join(visible_passages)
     else:
         body = "\n".join(f"  “{line}”" for line in visible_passages)
 
+    if literary_work:
+        rendered_text = (
+            f"语言：{language_name}\n\n"
+            f"作品正文（现存部分）：\n\n{body}"
+        )
+    elif literary_commentary:
+        rendered_text = (
+            f"语言：{language_name}\n\n"
+            f"作品校注（现存部分）：\n\n{body}"
+        )
+    else:
+        rendered_text = (
+            f"语言：{language_name}\n\n"
+            f"可辨文字：\n{body}"
+        )
     return {
         "status": "readable",
         "language_code": language_code,
         "legibility": mode,
         "readability": readability,
         "visible_passages": visible_passages,
-        "text": (
-            f"语言：{language_name}\n\n"
-            f"可辨文字：\n{body}\n\n"
-            "这些是文书留下的原话。它们可以作为一份记载，"
-            "但其中的主张仍需与其他证据相互核对。"
-        ),
+        "text": rendered_text,
     }
+
+
+def is_public_inscription(evidence) -> bool:
+    """Whether exposed large lettering can be approached as ordinary signage."""
+    return "visibility:public_inscription" in evidence.physical_features.get(
+        "tags", ()) and bool(evidence.content_data.get("written_content"))
+
+
+def preview_public_inscription(evidence, known_languages: set[str]) -> dict | None:
+    """Return only the immediately visible heading of a public inscription."""
+    if not is_public_inscription(evidence):
+        return None
+    result = read_document(evidence, known_languages)
+    preview = {
+        "status": result.get("status", "no_text"),
+        "language_code": result.get("language_code", "unknown"),
+    }
+    visible = result.get("visible_passages", ())
+    if visible:
+        preview["text"] = visible[0]
+    elif result.get("status") == "unknown_language":
+        preview["text"] = result.get("text", "")
+    return preview

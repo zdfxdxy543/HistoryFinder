@@ -485,6 +485,9 @@ function InspectPanel(props: {
             : "靠近地图上的存储地点进行搜索，找到的材料会进入调查目录。"}
         </p>
       </section>
+      {selected?.kind === "evidence" && selected.description_cn && (
+        <p className="plain-sight-copy">{selected.description_cn}</p>
+      )}
       {isContainer && (
         <div className="command-row">
           <button className="command-button primary" disabled={!props.nearby || props.busy} onClick={() => props.onSearch(selected.id)}>
@@ -497,9 +500,9 @@ function InspectPanel(props: {
           <button className="command-button primary" disabled={!props.nearby || props.busy} onClick={() => props.onExamine(selected.id)}>
             <Search size={15} /> {props.examined ? "复查" : "检查"}
           </button>
-          {selected.subtype === "document" && (
-            <button className="command-button" disabled={!props.nearby || !props.examined || props.busy} onClick={() => props.onRead(selected.id)}>
-              <FileText size={15} /> {props.read ? "重读" : "阅读"}
+          {selected.can_read && (
+            <button className="command-button" disabled={!props.nearby || (!props.examined && !selected.quick_read) || props.busy} onClick={() => props.onRead(selected.id)}>
+              <FileText size={15} /> {props.read ? "重读" : selected.quick_read ? "阅读铭文" : "阅读"}
             </button>
           )}
           <button className={props.compareIds.includes(selected.id) ? "command-button selected" : "command-button"} disabled={!props.examined} onClick={() => props.onToggleCompare(selected.id)}>

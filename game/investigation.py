@@ -6,6 +6,8 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from simulation.technology import TECHNOLOGY_ARTIFACT_SUBTYPES
+
 
 EVIDENCE_DOMAIN_BY_SUBTYPE = {
     "battlefield_ruins": ("warfare", "architecture"),
@@ -78,6 +80,10 @@ EVIDENCE_DOMAIN_BY_SUBTYPE = {
     "foundation_stone": ("architecture", "local_history"),
     "founding_legend": ("local_history",),
 }
+EVIDENCE_DOMAIN_BY_SUBTYPE.update({
+    subtype: ("natural_philosophy", "craftsmanship")
+    for subtype in TECHNOLOGY_ARTIFACT_SUBTYPES
+})
 
 
 PREDICATE_DOMAINS = {

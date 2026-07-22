@@ -20,8 +20,16 @@ from game.local_map import LocalMapBuilder, build_evidence_targets
 from game.local_time import LocalTimeSimulation
 from game.observation import build_evidence_observations
 from narrative.context_builder import build_evidence_context
-from narrative.document_reader import read_document
-from narrative.evidence_describer import describe_evidence
+from narrative.document_reader import (
+    is_public_inscription,
+    preview_public_inscription,
+    read_document,
+)
+from narrative.evidence_describer import describe_at_glance, describe_evidence
+from simulation.text_carriers import (
+    has_text_carrier,
+    materialize_text_carrier,
+)
 
 
 ROLE_NAMES = {
@@ -66,6 +74,7 @@ class PlayerSession:
         settlement = self.world.settlements[self.current_location_id]
         self.local_map = LocalMapBuilder().build(self.world, settlement)
         self._local_maps = {self.current_location_id: self.local_map}
+        self._decorate_local_map_evidence()
         self.local_time = LocalTimeSimulation(self.local_map)
 
     def bootstrap(self) -> dict:
@@ -200,8 +209,31 @@ class PlayerSession:
         }, minutes)
 
     def read(self, evidence_id: str) -> dict:
+        candidate = self.world.evidence.get(evidence_id)
+        quick_read = candidate is not None and is_public_inscription(candidate)
+        if quick_read and evidence_id not in self.knowledge.discovered_evidence_ids:
+            marker = next(
+                (item for item in self.local_map["entities"]
+                 if item["kind"] == "evidence" and item["id"] == evidence_id),
+                None,
+            )
+            if (marker is None
+                    or candidate.location_id != self.current_location_id
+                    or candidate.state == "destroyed"):
+                raise PlayerActionError("这里找不到这处铭文。")
+            distance = (
+                abs(marker["x"] - self.local_time.player["x"])
+                + abs(marker["y"] - self.local_time.player["y"])
+            )
+            if distance > 1:
+                raise PlayerActionError("需要先走到铭文旁边。")
+            self.knowledge.discover_evidence(candidate.id)
+            self._sync_discovered_evidence()
         evidence = self._local_evidence(evidence_id)
-        self._require_examined(evidence.id)
+        if not quick_read:
+            self._require_examined(evidence.id)
+        if has_text_carrier(evidence):
+            evidence = materialize_text_carrier(self.world, evidence.id)
         result = read_document(evidence, self.known_languages)
         reading = DocumentReading.from_result(
             evidence.id, self.current_location_id, result)
@@ -220,8 +252,9 @@ class PlayerSession:
             "reading": reading.to_dict(),
             "text_cn": result.get("text", "没有可读取的内容。"),
             "learned_claims": [item.to_dict() for item in learned],
+            "local_map": self.local_map,
             "journal": self.journal_payload(),
-        }, 30)
+        }, 5 if quick_read else 30)
 
     def consult(self, evidence_id: str, informant_id: str) -> dict:
         evidence = self._local_evidence(evidence_id)
@@ -244,7 +277,8 @@ class PlayerSession:
             RecordPublicView.from_record_and_evidence(record, evidence)
             if record is not None else None)
         reading_view = None
-        if evidence.evidence_type == "document":
+        if has_text_carrier(evidence):
+            evidence = materialize_text_carrier(self.world, evidence.id)
             reading_view = ReadingPublicView.from_result(
                 read_document(evidence, set(consultant.known_languages)))
         result = self._consultation_engine.consult(
@@ -356,6 +390,7 @@ class PlayerSession:
         if self.local_map is None:
             self.local_map = LocalMapBuilder().build(self.world, destination)
             self._local_maps[destination_id] = self.local_map
+        self._decorate_local_map_evidence()
         self.local_time = LocalTimeSimulation(
             self.local_map,
             day=day + 1,
@@ -508,7 +543,9 @@ class PlayerSession:
     def _evidence_payload(self, evidence) -> dict:
         view = EvidencePublicView.from_evidence(evidence)
         payload = view.to_dict()
-        payload["can_read"] = evidence.evidence_type == "document"
+        payload["can_read"] = has_text_carrier(evidence)
+        payload["quick_read"] = is_public_inscription(evidence)
+        payload["description_cn"] = self._glance_description(evidence)
         payload["examined"] = evidence.id in self.knowledge.examined_evidence_ids
         payload["read"] = evidence.id in self.knowledge.read_evidence_ids
         payload["source_group_ids"] = list(
@@ -560,7 +597,7 @@ class PlayerSession:
             "state": evidence.state,
             "material": evidence.material,
             "zone": site.name if site is not None else map_target["name"],
-            "description_cn": "",
+            "description_cn": self._glance_description(evidence),
             "dialogue_cn": "",
             "container_id": target["id"],
             "storage_site_id": evidence.container_id or "",
@@ -569,7 +606,27 @@ class PlayerSession:
                 else evidence.storage_position or "原位置"),
             "placement_kind": target["placement_kind"],
             "blocks_movement": False,
+            "can_read": has_text_carrier(evidence),
+            "quick_read": is_public_inscription(evidence),
         }
+
+    def _glance_description(self, evidence) -> str:
+        preview = preview_public_inscription(
+            evidence, self.known_languages)
+        return describe_at_glance(
+            build_evidence_context(evidence), preview)
+
+    def _decorate_local_map_evidence(self) -> None:
+        """Attach only plain-sight information to direct map evidence."""
+        for entity in self.local_map["entities"]:
+            if entity["kind"] != "evidence":
+                continue
+            evidence = self.world.evidence.get(entity["id"])
+            if evidence is None:
+                continue
+            entity["description_cn"] = self._glance_description(evidence)
+            entity["can_read"] = has_text_carrier(evidence)
+            entity["quick_read"] = is_public_inscription(evidence)
 
     def _informants_payload(self) -> list[dict]:
         return [

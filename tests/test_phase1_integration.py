@@ -160,7 +160,8 @@ def test_disaster_aftermath_can_transfer_external_aid():
         if evidence.evidence_type == "document"
     ]
     assert documents
-    assert documents[0].content_data["written_content"]["passages"]
+    assert documents[0].content_data["text_plan"]["materialization_status"] \
+        == "planned"
 
 
 def test_disaster_aftermath_can_become_long_term_decline():

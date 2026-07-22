@@ -13,11 +13,14 @@ from simulation.effects import (
     ModifyTechnologyLevel,
     ModifyTheoreticalKnowledge,
 )
-from simulation.event_rules import EventRuleRegistry
+from simulation.event_rules import EventRuleRegistry, EventRuleResult
 from simulation.events import HistoricalEvent
+from simulation.evidence import Evidence
 from simulation.pressures import tick_economy
 from simulation.settlement import RelationshipData, Settlement
 from simulation.world import World
+from simulation.text_carriers import materialize_text_carrier
+from simulation.technology import TECHNOLOGY_CATALOG, TECHNOLOGY_BY_SUBTYPE
 from simulation.written_content import build_written_content
 
 
@@ -104,7 +107,15 @@ def test_literary_and_theoretical_works_require_a_library():
         assert condition.check(world, settlement, 1)
 
 
-@pytest.mark.parametrize("genre", ["epic", "drama", "chronicle", "lyric_cycle"])
+def test_new_literary_generation_only_uses_chronicle_and_biography():
+    rule = EventRuleRegistry().rules["literary_work"]
+
+    assert {outcome.outcome_type for outcome in rule.possible_outcomes} == {
+        "chronicle", "biography",
+    }
+
+
+@pytest.mark.parametrize("genre", ["epic", "drama", "lyric_cycle"])
 def test_literary_manuscripts_store_substantial_deterministic_text(genre):
     event = HistoricalEvent(
         id="event_literary", year=12, event_type="literary_work",
@@ -123,6 +134,368 @@ def test_literary_manuscripts_store_substantial_deterministic_text(genre):
     assert first == second
     assert len(first["passages"]) >= 15
     assert len(stored_text) >= 300
+    assert all(marker not in stored_text for marker in (
+        "本书讲述", "本章讨论", "第一歌讲述", "第一卷追索",
+    ))
+
+
+@pytest.mark.parametrize("genre", ["chronicle", "biography"])
+def test_grounded_literature_does_not_append_fixed_explanatory_tail(genre):
+    event = HistoricalEvent(
+        id=f"event_grounded_{genre}", year=18,
+        event_type="literary_work", title="grounded work",
+        severity=0.2, primary_location="stl_1",
+        details={
+            "work_title": "青石镇洪水记录（18年写成）",
+            "author_name": "林恩",
+            "genre": genre,
+            "setting_name": "青石镇",
+            "biography_subject_name": "林恩",
+            "biography_subject_birth_year": -12,
+            "biography_subject_roles": ["ruler"],
+            "literary_sources": [{
+                "event_id": "event_flood",
+                "year": 11,
+                "event_type": "disaster",
+                "title": "青石镇遭遇春季洪水",
+                "summary": "洪水冲坏了南岸粮仓，居民随后重修河堤。",
+                "participant_names": ["青石镇"],
+                "person_names": ["林恩"],
+                "subject_role": "当时的统治者",
+            }],
+        },
+    )
+
+    written = build_written_content(
+        event, "literary_manuscript", 42, f"evd_grounded_{genre}")
+    text = "\n".join(passage["text"] for passage in written["passages"])
+
+    assert "青石镇遭遇春季洪水" in text
+    assert "南岸粮仓" in text
+    assert all(marker not in text for marker in (
+        "编排说明", "人物说明", "地点说明", "年份说明",
+        "来源说明", "增补说明", "综合上述记录", "后续版本",
+    ))
+
+
+@pytest.mark.parametrize("genre,expected_marker", [
+    ("epic", "城门"),
+    ("drama", "〔第一场"),
+    ("chronicle", "编定此书"),
+    ("lyric_cycle", "第一首"),
+])
+def test_literary_manuscripts_contain_the_work_not_a_summary(
+        genre, expected_marker):
+    event = HistoricalEvent(
+        id=f"event_{genre}", year=12, event_type="literary_work",
+        title="A literary work", severity=0.2, primary_location="stl_1",
+        details={
+            "work_title": "The Returning Road",
+            "author_name": "Eda",
+            "genre": genre,
+        },
+    )
+
+    written = build_written_content(
+        event, "literary_manuscript", 99, f"evd_{genre}")
+    stored_text = "".join(
+        passage["text"] for passage in written["passages"])
+
+    assert expected_marker in stored_text
+    assert "第一歌讲述" not in stored_text
+    assert "第一卷追索" not in stored_text
+
+
+@pytest.mark.parametrize("genre", [
+    "epic", "drama", "chronicle", "lyric_cycle",
+])
+def test_literary_body_uses_frozen_historical_sources(genre):
+    event = HistoricalEvent(
+        id=f"event_sourced_{genre}", year=18,
+        event_type="literary_work", title="A sourced literary work",
+        severity=0.2, primary_location="stl_1",
+        details={
+            "work_title": "The River Remembers",
+            "author_name": "Eda",
+            "genre": genre,
+            "setting_name": "青石镇",
+            "literary_sources": [{
+                "event_id": "event_flood",
+                "year": 11,
+                "event_type": "disaster",
+                "title": "青石镇遭遇春季洪水",
+                "summary": "洪水冲坏了南岸粮仓，居民随后重修河堤。",
+                "participant_names": ["青石镇"],
+                "person_names": ["林恩"],
+            }],
+        },
+    )
+
+    written = build_written_content(
+        event, "literary_manuscript", 42, f"evd_sourced_{genre}")
+    stored_text = "\n".join(
+        passage["text"] for passage in written["passages"])
+
+    assert "11年" in stored_text
+    assert "青石镇遭遇春季洪水" in stored_text
+    assert "南岸粮仓" in stored_text
+    assert all(marker not in stored_text for marker in (
+        "今仅见", "此条未作裁定", "三说并存", "此处留白",
+    ))
+
+
+def test_literary_commentary_is_labeled_and_uses_historical_sources():
+    event = HistoricalEvent(
+        id="event_commentary", year=52,
+        event_type="literary_work", title="A literary commentary",
+        severity=0.2, primary_location="stl_1",
+        details={
+            "work_title": "八任执政者记",
+            "author_name": "Caewyn",
+            "genre": "chronicle",
+            "setting_name": "Bridgeheim",
+            "literary_sources": [{
+                "event_id": "event_war",
+                "year": 32,
+                "event_type": "war",
+                "title": "Bridgeheim攻陷Markhold",
+                "summary": "Bridgeheim的军队攻陷了Markhold。",
+                "participant_names": ["Bridgeheim", "Markhold"],
+                "person_names": ["Kaelrion", "Nyllin"],
+            }],
+        },
+    )
+    written = build_written_content(
+        event, "literary_commentary", 42, "evd_commentary")
+    evidence = Evidence(
+        id="evd_commentary", event_id=event.id,
+        evidence_type="document", subtype="literary_commentary",
+        location_type="settlement", location_id="stl_1",
+        created_year=52, material="parchment",
+        max_durability=80, current_durability=80,
+        content_data={"written_content": written},
+        physical_features={
+            "tags": ["legibility:clear_large_letters"],
+        },
+    )
+
+    reading = read_document(evidence, {"common"})
+
+    assert "作品校注（现存部分）" in reading["text"]
+    assert "校者据现存抄本与本地档案" in reading["text"]
+    assert "不是作品正文" not in reading["text"]
+    assert "Bridgeheim攻陷Markhold" in reading["text"]
+    assert "可辨文字" not in reading["text"]
+
+
+def test_new_literary_work_freezes_only_earlier_local_history():
+    world = World(seed=207)
+    world.generate(years=0)
+    settlement = next(iter(world.settlements.values()))
+    local_source = HistoricalEvent(
+        id="event_local_war", year=6, event_type="war",
+        title=f"{settlement.name}守住北门",
+        severity=0.8, primary_location=settlement.id,
+        participants=[settlement.id],
+        details={
+            "description_cn": (
+                f"6年，{settlement.name}的居民在北门击退了进攻者。"
+            ),
+        },
+        importance_score=0.8,
+        visibility_score=0.9,
+    )
+    future_source = HistoricalEvent(
+        id="event_future_flood", year=20, event_type="disaster",
+        title=f"{settlement.name}未来的洪水",
+        severity=0.9, primary_location=settlement.id,
+        participants=[settlement.id],
+        details={"description_cn": "这件事在作品创作时尚未发生。"},
+        importance_score=0.9,
+        visibility_score=0.9,
+    )
+    world._add_event(local_source)
+    world._add_event(future_source)
+
+    rule = EventRuleRegistry().rules["literary_work"]
+    outcome = next(
+        item for item in rule.possible_outcomes
+        if item.outcome_type == "chronicle"
+    )
+    result = EventRuleResult(
+        rule=rule,
+        settlement=settlement,
+        total_score=1.0,
+        trigger_factors={},
+        selected_outcome=outcome,
+        concrete_effects=[],
+    )
+    literary_event = HistoricalEvent(
+        id="event_new_work", year=12, event_type="literary_work",
+        title="new work", severity=0.2,
+        primary_location=settlement.id,
+        participants=[settlement.id],
+    )
+
+    world._attach_people_to_rule_event(
+        literary_event, result, settlement, 12, {})
+
+    source_ids = literary_event.details["source_event_ids"]
+    assert "event_local_war" in source_ids
+    assert "event_future_flood" not in source_ids
+    written = build_written_content(
+        literary_event, "literary_manuscript", 207,
+        "evd_new_sourced_work")
+    stored_text = "\n".join(
+        passage["text"] for passage in written["passages"])
+    assert "6年" in stored_text
+    assert f"{settlement.name}守住北门" in stored_text
+    assert "未来的洪水" not in stored_text
+    assert settlement.name in literary_event.details["work_title"]
+    assert "战乱" in literary_event.details["work_title"]
+
+
+def test_biography_freezes_only_the_subjects_real_earlier_events():
+    world = World(seed=208)
+    world.generate(years=0)
+    settlement = next(iter(world.settlements.values()))
+    rule = EventRuleRegistry().rules["literary_work"]
+    outcome = next(
+        item for item in rule.possible_outcomes
+        if item.outcome_type == "biography"
+    )
+    result = EventRuleResult(
+        rule=rule,
+        settlement=settlement,
+        total_score=1.0,
+        trigger_factors={},
+        selected_outcome=outcome,
+        concrete_effects=[],
+    )
+    literary_event = HistoricalEvent(
+        id="event_biography", year=12, event_type="literary_work",
+        title="new biography", severity=0.2,
+        primary_location=settlement.id, participants=[settlement.id],
+    )
+
+    world._attach_people_to_rule_event(
+        literary_event, result, settlement, 12, {})
+
+    subject_id = literary_event.details["biography_subject_id"]
+    source_ids = literary_event.details["source_event_ids"]
+    assert source_ids
+    assert literary_event.details["genre"] == "biography"
+    assert literary_event.details["biography_subject_name"] in \
+        literary_event.details["work_title"]
+    for source_id in source_ids:
+        source = world.get_event(source_id)
+        assert source.year < literary_event.year
+        assert subject_id in source.person_ids
+
+    written = build_written_content(
+        literary_event, "literary_manuscript", 208,
+        "evd_grounded_biography")
+    text = "\n".join(passage["text"] for passage in written["passages"])
+    assert literary_event.details["biography_subject_name"] in text
+    assert all(world.get_event(source_id).title in text
+               for source_id in source_ids)
+
+
+def test_epitaph_uses_the_dead_rulers_frozen_history(developed_world):
+    succession = next(
+        event for event in developed_world.events
+        if event.event_type == "ruler_change"
+        and event.details.get("epitaph_sources")
+    )
+    subject_id = succession.details["epitaph_subject_id"]
+    sources = succession.details["epitaph_sources"]
+    for source in sources:
+        historical_event = developed_world.get_event(source["event_id"])
+        assert historical_event.year < succession.year
+        assert subject_id in historical_event.person_ids
+
+    tomb = next(
+        evidence for evidence in developed_world.evidence.values()
+        if evidence.event_id == succession.id
+        and evidence.subtype == "ruler_tomb"
+    )
+    text = "\n".join(
+        passage["text"]
+        for passage in tomb.content_data["written_content"]["passages"]
+    )
+    assert succession.details["epitaph_subject_name"] in text
+    assert all(source["summary"] in text for source in sources)
+    assert all(marker not in text for marker in (
+        "人物名册曾记录的身份包括", "当时的摘要为", "此句只记录",
+        "共引用", "未记录的行动不列为功绩", "不等同于墓主本人的陈述",
+        "founder", "ruler", "general", "scholar", "writer", "heir",
+    ))
+    assert all(invented not in text for invented in (
+        "守过三次歉收之仓", "重开东井", "接纳北来的流民", "整修旧路",
+    ))
+
+
+def test_literary_reader_labels_and_formats_the_work_as_body_text():
+    event = HistoricalEvent(
+        id="event_readable_literature", year=12,
+        event_type="literary_work", title="A literary work",
+        severity=0.2, primary_location="stl_1",
+        details={
+            "work_title": "The Returning Road",
+            "author_name": "Eda",
+            "genre": "drama",
+        },
+    )
+    written = build_written_content(
+        event, "literary_manuscript", 42, "evd_readable_literature")
+    evidence = Evidence(
+        id="evd_readable_literature", event_id=event.id,
+        evidence_type="document", subtype="literary_manuscript",
+        location_type="settlement", location_id="stl_1",
+        created_year=12, material="parchment",
+        max_durability=80, current_durability=80,
+        content_data={"written_content": written},
+        physical_features={
+            "tags": ["legibility:clear_large_letters"],
+        },
+    )
+
+    reading = read_document(evidence, {"common"})
+
+    assert "作品正文（现存部分）" in reading["text"]
+    assert "〔第一场" in reading["text"]
+    assert "可辨文字" not in reading["text"]
+    assert "  “" not in reading["text"]
+
+
+def test_technology_catalog_and_generated_artifacts_are_concrete(
+        developed_world):
+    assert len(TECHNOLOGY_CATALOG) >= 16
+    assert len({item.artifact_subtype for item in TECHNOLOGY_CATALOG}) \
+        == len(TECHNOLOGY_CATALOG)
+    assert len({item.display_name for item in TECHNOLOGY_CATALOG}) \
+        == len(TECHNOLOGY_CATALOG)
+
+    discoveries = [
+        event for event in developed_world.events
+        if event.event_type == "discovery"
+    ]
+    assert discoveries
+    for event in discoveries:
+        artifact = next(
+            evidence for evidence in developed_world.evidence.values()
+            if evidence.event_id == event.id
+            and evidence.evidence_type == "artifact"
+        )
+        profile = TECHNOLOGY_BY_SUBTYPE[artifact.subtype]
+        assert artifact.subtype == event.details["artifact_subtype"]
+        assert artifact.material == profile.material
+        assert artifact.physical_features["display_name"] \
+            == profile.display_name
+        assert f"form:{profile.form_code}" in \
+            artifact.physical_features["tags"]
+        assert f"mechanism:{profile.mechanism_code}" in \
+            artifact.physical_features["tags"]
 
 
 def test_theoretical_treatise_stores_method_limits_and_applications():
@@ -226,6 +599,7 @@ def test_new_documents_keep_source_truth_out_of_examination_context(
             if item.subtype == subtype and item.state != "destroyed"
         )
         source_event = developed_world.get_event(evidence.event_id)
+        materialize_text_carrier(developed_world, evidence.id)
         context = build_evidence_context(evidence)
         reading = read_document(evidence, {"common"})
 
