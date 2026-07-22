@@ -139,6 +139,9 @@ class EventRule:
         candidates = [
             other for other in world.settlements.values()
             if other.alive and other.id != settlement.id
+            and (self.event_type != "war"
+                 or other.controller_polity_id
+                 != settlement.controller_polity_id)
         ]
         if not candidates:
             return None
@@ -256,12 +259,18 @@ def resolve_placeholders(effect, settlement, world, rng, context=None):
     if isinstance(effect, str):
         if effect == "$SETTLEMENT":
             return settlement.id
+        if effect == "$SETTLEMENT_POLITY":
+            return settlement.controller_polity_id
         if effect == "$OLD_RULER":
             return settlement.ruler_name
         if effect == "$NEW_RULER":
             return context.get("new_ruler_name") or settlement.ruler_name
         if effect == "$PARTNER":
             return context.get("partner_id") or settlement.id
+        if effect == "$PARTNER_POLITY":
+            partner = world.settlements.get(context.get("partner_id"))
+            return (partner.controller_polity_id if partner is not None
+                    else settlement.controller_polity_id)
         return effect
 
     try:
@@ -602,7 +611,7 @@ class EventRuleRegistry:
                        ModifyRelationship("$SETTLEMENT", "$PARTNER",
                                           trust_delta=-0.25, hostility_delta=0.35,
                                           reason="war"),
-                       TransferControl("$PARTNER", new_controller_id="$SETTLEMENT",
+                       TransferControl("$PARTNER", new_controller_id="$SETTLEMENT_POLITY",
                                        reason="conquest"),
                        DamageBuilding("$PARTNER", "fortification", 0.45, reason="siege"),
                    ]),

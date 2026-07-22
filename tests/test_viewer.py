@@ -29,6 +29,32 @@ def test_viewer_payload_is_json_serializable_and_complete():
     assert payload["geography"]["ocean_cells"] > 0
     assert payload["geography"]["lake_cells"] > 0
     assert payload["geography"]["river_cells"] > 0
+    assert len(payload["territory"]["owners"]) == world.geography.height
+    assert len(payload["territory"]["owners"][0]) == world.geography.width
+
+
+def test_viewer_territory_overlay_matches_current_polity_control():
+    world, payload = _small_payload()
+    territory = payload["territory"]
+    code_by_polity = {
+        item["id"]: item["code"] for item in territory["polities"]
+    }
+    valid_codes = {territory["unclaimed_code"], *code_by_polity.values()}
+
+    assert territory["basis"] == "derived_current_control"
+    assert all(code in valid_codes
+               for row in territory["owners"] for code in row)
+    for settlement in world.settlements.values():
+        if settlement.alive:
+            assert territory["owners"][settlement.grid_y][settlement.grid_x] \
+                == code_by_polity[settlement.controller_polity_id]
+
+    blocked_codes = {BIOME_CODES["ocean"], BIOME_CODES["lake"]}
+    for y, row in enumerate(payload["geography"]["terrain"]):
+        for x, biome_code in enumerate(row):
+            if biome_code in blocked_codes:
+                assert territory["owners"][y][x] \
+                    == territory["unclaimed_code"]
 
 
 def test_viewer_payload_exposes_relationship_indexes():
@@ -54,3 +80,6 @@ def test_viewer_static_assets_exist():
         path = static_dir / filename
         assert path.is_file()
         assert path.stat().st_size > 500
+
+    assert "toggle-territories" in (static_dir / "index.html").read_text(
+        encoding="utf-8")

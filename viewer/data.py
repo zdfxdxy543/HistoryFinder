@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 
 from config import SEA_LEVEL
+from simulation.territory import build_territory_payload
 from simulation.world import World
 
 
@@ -22,7 +23,6 @@ BIOME_CODES = {
     "lake": 10,
     "river": 11,
 }
-
 
 def _json_safe(value):
     if isinstance(value, dict):
@@ -160,6 +160,7 @@ def build_world_payload(world: World) -> dict:
                 1 for row in terrain for code in row
                 if code == BIOME_CODES["river"]),
         },
+        "territory": build_territory_payload(world, terrain, BIOME_CODES),
         "settlements": settlements,
         "events": events,
         "records": records,

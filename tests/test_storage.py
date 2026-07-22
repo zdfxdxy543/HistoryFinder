@@ -3,6 +3,8 @@
 import copy
 import random
 
+import pytest
+
 from simulation.effects import DamageBuilding, DestroySettlement, EffectResolver
 from simulation.evidence import Evidence, tick_natural_decay
 from simulation.events import HistoricalEvent
@@ -178,7 +180,7 @@ def test_destroyed_library_evacuates_collection_and_rollback_restores_it():
                for item_id in stored_before)
 
 
-def test_storage_roundtrip_and_legacy_migration():
+def test_storage_roundtrip():
     world = _world(3)
     restored = World.from_dict(world.to_dict())
     assert {
@@ -189,19 +191,15 @@ def test_storage_roundtrip_and_legacy_migration():
     assert all(item.container_id in restored.storage_sites
                for item in restored.evidence.values())
 
-    legacy = world.to_dict()
-    legacy.pop("storage_sites")
-    legacy["schema_version"] = 6
-    for item in legacy["evidence"]:
-        for key in ("container_id", "holder_type", "holder_id",
-                    "storage_position", "location_history"):
-            item.pop(key, None)
-        item["schema_version"] = 5
-    migrated = World.from_dict(legacy)
-    assert migrated.storage_sites
-    assert all(item.container_id in migrated.storage_sites
-               for item in migrated.evidence.values())
-    assert all(item.schema_version == 7 for item in migrated.evidence.values())
+
+
+def test_world_rejects_missing_storage_state():
+    world = _world(3)
+    data = world.to_dict()
+    data.pop("storage_sites")
+
+    with pytest.raises(ValueError, match="missing: storage_sites"):
+        World.from_dict(data)
 
 
 def test_viewer_payload_exposes_storage_relationships():

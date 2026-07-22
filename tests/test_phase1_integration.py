@@ -94,7 +94,13 @@ def test_war_cooldown_is_enforced_per_pair():
 def test_event_budget_stays_below_noise_regression_baseline():
     world = World(seed=42)
     world.generate(years=100)
-    assert 100 <= len(world.events) < 600
+    settlement_years = sum(
+        world.current_year - settlement.founded_year + 1
+        for settlement in world.settlements.values()
+    )
+
+    assert len(world.events) >= 100
+    assert len(world.events) / settlement_years < 0.75
 
 
 def test_pressure_driven_rebellion_is_reachable_and_has_a_cause():

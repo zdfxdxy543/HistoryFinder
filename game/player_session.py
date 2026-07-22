@@ -23,6 +23,7 @@ from simulation.person import (
     public_mobility_status,
     public_travel_role,
 )
+from simulation.territory import build_territory_payload
 from game.observation import build_evidence_observations
 from narrative.context_builder import build_evidence_context
 from narrative.document_reader import (
@@ -502,6 +503,12 @@ class PlayerSession:
              for x in range(geography.width)]
             for y in range(geography.height)
         ]
+        territory = build_territory_payload(
+            self.world, terrain, PLAYER_BIOME_CODES)
+        polity_codes = {
+            polity["id"]: polity["code"]
+            for polity in territory["polities"]
+        }
         locations = [
             {
                 "id": settlement.id,
@@ -511,6 +518,8 @@ class PlayerSession:
                 "site_type": "settlement" if settlement.alive else "ruin",
                 "size": settlement.size,
                 "biome": str(settlement.biome),
+                "polity_code": polity_codes.get(
+                    settlement.controller_polity_id),
             }
             for settlement in sorted(
                 self.world.settlements.values(), key=lambda item: item.id)
@@ -520,6 +529,14 @@ class PlayerSession:
             "height": geography.height,
             "terrain": terrain,
             "biome_codes": dict(PLAYER_BIOME_CODES),
+            "territory": {
+                "unclaimed_code": territory["unclaimed_code"],
+                "owners": territory["owners"],
+                "polities": [
+                    {"code": polity["code"], "name": polity["name"]}
+                    for polity in territory["polities"]
+                ],
+            },
             "locations": locations,
             "current_location_id": self.current_location_id,
         }

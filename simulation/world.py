@@ -11,9 +11,15 @@ from typing import Optional, Any
 
 import networkx as nx
 
-from config import GRID_WIDTH, GRID_HEIGHT, SIM_YEARS, INITIAL_SETTLEMENT_COUNT
+from config import (
+    DYNAMIC_FOUNDING_MAX_PER_YEAR,
+    GRID_WIDTH, GRID_HEIGHT, SIM_YEARS, INITIAL_SETTLEMENT_COUNT,
+)
 from simulation.geography import Geography, pick_settlement_sites
 from simulation.settlement import Settlement, SettlementManager
+from simulation.polity import (
+    Polity, PolityManager, SettlementControlPeriod,
+)
 from simulation.person import Person, PersonManager
 from simulation.informants import (
     Informant, InformantManager, KnowledgeEntry,
@@ -25,13 +31,6 @@ from simulation.evidence import (
 )
 from simulation.records import HistoricalRecord, RecordGenerator
 from simulation.storage import StorageManager, StorageSite
-from simulation.written_content import (
-    PUBLIC_INSCRIPTION_SUBTYPES,
-)
-from simulation.text_carriers import (
-    initialize_text_plan,
-    materialize_text_carrier,
-)
 from simulation.technology import TECHNOLOGY_CATALOG
 from simulation.research import generate_research_process
 from simulation.mobility import (
@@ -44,12 +43,18 @@ from simulation.mobility import (
     plan_event_transfers,
 )
 from simulation.pressures import compute_all_pressures, tick_economy
+from simulation.founding import (
+    FoundingPlan,
+    SettlementFoundingPlanner,
+    build_founding_site_context,
+)
 from simulation.event_rules import EventRuleRegistry, EventRuleResult
 from simulation.effects import (
     ChangeRuler,
     DamageBuilding,
     DestroySettlement,
     EffectResolver,
+    FoundSettlement,
     ModifyFoodStock,
     ModifyInfrastructure,
     ModifyCulturalInfluence,
@@ -119,6 +124,8 @@ THEORETICAL_TITLES = {
     "astronomy": ["行星周期表解", "影长与季节论", "星位观测法"],
 }
 
+WORLD_SCHEMA_VERSION = 12
+
 @dataclass
 class World:
     """世界容器。"""
@@ -128,6 +135,9 @@ class World:
 
     geography: Optional[Geography] = None
     settlements: dict[str, Settlement] = field(default_factory=dict)
+    polities: dict[str, Polity] = field(default_factory=dict)
+    settlement_control_periods: dict[str, SettlementControlPeriod] = field(
+        default_factory=dict)
     events: list[HistoricalEvent] = field(default_factory=list)
     evidence: dict[str, Evidence] = field(default_factory=dict)
     records: dict[str, HistoricalRecord] = field(default_factory=dict)
@@ -138,12 +148,14 @@ class World:
     event_history_by_settlement: dict[str, list[str]] = field(default_factory=dict)
 
     _settlement_mgr: Optional[SettlementManager] = None
+    _polity_mgr: Optional[PolityManager] = None
     _event_gen: Optional[EventGenerator] = None
     _evidence_gen: Optional[EvidenceGenerator] = None
     _record_gen: Optional[RecordGenerator] = None
     _person_mgr: Optional[PersonManager] = None
     _informant_mgr: Optional[InformantManager] = None
     _storage_mgr: Optional[StorageManager] = None
+    _founding_planner: Optional[SettlementFoundingPlanner] = None
 
     # 追踪状态
     _last_ruler_change: dict[str, int] = field(default_factory=dict)
@@ -154,6 +166,7 @@ class World:
         default_factory=list)
     _pending_literary_spreads: list[tuple[str, int, str]] = field(
         default_factory=list)
+    _last_founding_year: dict[str, int] = field(default_factory=dict)
 
     # Phase 2 新增
     debug_causes: bool = False
@@ -167,19 +180,8 @@ class World:
 
     def generate(self, years: int = SIM_YEARS):
         rng = random.Random(self.seed)
+        self._initialize_runtime_managers()
         self.geography = Geography(self.seed)
-        self._settlement_mgr = SettlementManager(self.seed)
-        self._event_gen = EventGenerator(self.seed)
-        self._evidence_gen = EvidenceGenerator(self.seed)
-        self._record_gen = RecordGenerator(self.seed)
-        self._person_mgr = PersonManager(self.seed)
-        self._informant_mgr = InformantManager(
-            self.seed, self.informants, self.knowledge_entries)
-        self._storage_mgr = StorageManager(self.seed, self.storage_sites)
-
-        # Phase 2: 初始化规则与效果系统
-        self._rule_registry = EventRuleRegistry()
-        self._effect_resolver = EffectResolver(self.seed)
 
         # Step 1: 生成地理
         self.geography.generate()
@@ -196,10 +198,17 @@ class World:
             self._pop_milestones[stl.id] = 500
 
             ruler = self._create_initial_ruler_and_heir(stl, 0)
+            polity = self._polity_mgr.create_polity(stl.id, ruler.id, 0)
+            self.polities[polity.id] = polity
+            stl.controller_polity_id = polity.id
+            control = self._polity_mgr.create_control_period(
+                stl.id, polity.id, 0, "founding")
+            self.settlement_control_periods[control.id] = control
             self._informant_mgr.ensure_settlement_roles(self, stl, 0)
 
             event = self._event_gen.generate_founding_event(
                 stl.id, stl.name, 0, stl.ruler_name, ruler.id)
+            control.event_id = event.id
             self._add_event_with_evidence(event)
 
         # Step 3: 逐年模拟（分阶段）
@@ -208,6 +217,32 @@ class World:
             self._tick_year(year, rng)
 
         self.current_year = years
+
+    def _initialize_runtime_managers(self) -> None:
+        self._settlement_mgr = SettlementManager(self.seed)
+        self._polity_mgr = PolityManager(self.seed)
+        self._event_gen = EventGenerator(self.seed)
+        self._evidence_gen = EvidenceGenerator(self.seed)
+        self._record_gen = RecordGenerator(self.seed)
+        self._person_mgr = PersonManager(self.seed)
+        self._informant_mgr = InformantManager(
+            self.seed, self.informants, self.knowledge_entries)
+        self._storage_mgr = StorageManager(self.seed, self.storage_sites)
+        self._founding_planner = SettlementFoundingPlanner()
+        self._rule_registry = EventRuleRegistry()
+        self._effect_resolver = EffectResolver(self.seed)
+
+    def get_current_control_period(
+            self, settlement_id: str) -> SettlementControlPeriod | None:
+        current = [
+            period for period in self.settlement_control_periods.values()
+            if period.settlement_id == settlement_id
+            and period.end_year is None
+        ]
+        if len(current) > 1:
+            raise RuntimeError(
+                f"multiple current control periods for {settlement_id}")
+        return current[0] if current else None
 
     # ---- 年度模拟（Phase 2 分阶段） ----
 
@@ -231,6 +266,9 @@ class World:
         # Phase C: 计算压力
         self._pressures_cache = compute_all_pressures(self)
 
+        # Phase C2: stable settlements may establish planned colonies.
+        self._evaluate_natural_founding(year)
+
         # Phase D+E: 规则驱动事件评估 + 效果应用
         self._evaluate_rules_and_apply(year, alive, rng)
 
@@ -250,6 +288,103 @@ class World:
     def get_pressure(self, settlement_id: str, pressure_name: str) -> float:
         """获取某个聚落的某个压力指标值。"""
         return self._pressures_cache.get(settlement_id, {}).get(pressure_name, 0.0)
+
+    def _evaluate_natural_founding(self, year: int) -> list[str]:
+        sources = [
+            source for source in sorted(
+                self.settlements.values(), key=lambda item: item.id)
+            if self._founding_planner.may_attempt(self, source, year)
+        ]
+        if not sources:
+            return []
+
+        site_context = build_founding_site_context(self)
+        plans = []
+        for source in sources:
+            plan = self._founding_planner.evaluate(
+                self, source, year, site_context)
+            if plan is not None:
+                plans.append(plan)
+        plans.sort(key=lambda plan: (
+            -plan.trigger_factors.get("expansion_pressure", 0.0),
+            -plan.site_factors.get("site_score", 0.0),
+            plan.source_settlement_id,
+        ))
+
+        event_ids = []
+        for plan in plans[:DYNAMIC_FOUNDING_MAX_PER_YEAR]:
+            event = self._execute_founding_plan(plan, year)
+            if event is not None:
+                event_ids.append(event.id)
+        return event_ids
+
+    def _execute_founding_plan(
+            self, plan: FoundingPlan,
+            year: int) -> HistoricalEvent | None:
+        source = self.settlements.get(plan.source_settlement_id)
+        founder = self.persons.get(plan.founder_person_id)
+        if source is None or founder is None:
+            return None
+        founder_was_heir = "heir" in founder.roles
+        event_id = self._event_gen.reserve_id()
+        effect = FoundSettlement(
+            source_settlement_id=source.id,
+            new_settlement_id=self._settlement_mgr.reserve_id(),
+            new_settlement_name=self._settlement_mgr.reserve_name(),
+            grid_x=plan.x,
+            grid_y=plan.y,
+            founded_year=year,
+            biome=plan.biome,
+            settler_count=plan.settler_count,
+            food_transfer=plan.food_transfer,
+            treasury_transfer=plan.treasury_transfer,
+            founder_person_id=founder.id,
+            controller_polity_id=plan.controller_polity_id,
+            control_period_id=self._polity_mgr.reserve_control_id(),
+            event_id=event_id,
+            founding_type=plan.founding_type,
+            reason=plan.founding_type,
+        )
+        effect_ids = self._effect_resolver.apply_effects([effect], self)
+        if not effect_ids:
+            return None
+
+        settlement = self.settlements[effect.new_settlement_id]
+        self._ensure_heir(founder, year)
+        if founder_was_heir:
+            source_ruler = self.persons.get(source.ruler_id)
+            if source_ruler is not None and source_ruler.alive:
+                self._ensure_heir(source_ruler, year)
+        self._informant_mgr.ensure_settlement_roles(
+            self, settlement, year)
+
+        event = self._event_gen.generate_founding_event(
+            settlement.id,
+            settlement.name,
+            year,
+            founder.name,
+            founder.id,
+            origin_settlement_id=source.id,
+            origin_settlement_name=source.name,
+            settler_count=plan.settler_count,
+            controller_polity_id=plan.controller_polity_id,
+            founding_type=plan.founding_type,
+            reserved_event_id=event_id,
+        )
+        event.effect_ids = effect_ids
+        event.effects = [effect_to_dict(effect)]
+        event.trigger_factors = {
+            **plan.trigger_factors,
+            **plan.site_factors,
+        }
+        event.cause_event_ids = self._find_cause_events(
+            source.id, year, "founding", plan.trigger_factors)
+        event.importance_score = 0.72
+        event.visibility_score = 0.85
+        self._add_event_with_evidence(event)
+        self._record_effect_sources(event, [effect])
+        self._last_founding_year[source.id] = year
+        return event
 
     # ---- Notable people and succession ----
 
@@ -392,6 +527,11 @@ class World:
         if not effect_ids:
             return
         settlement.ruler_id = new_ruler.id
+        polity = self.polities.get(settlement.controller_polity_id)
+        if (polity is not None
+                and polity.capital_settlement_id == settlement.id
+                and polity.ruler_id == old_ruler.id):
+            polity.ruler_id = new_ruler.id
         event = self._event_gen.generate_ruler_change_event(
             year, settlement.id, settlement.name,
             old_ruler.name, new_ruler.name, "death",
@@ -572,13 +712,6 @@ class World:
                     result.target_settlement_id].name,
                 "outcome": result.selected_outcome.outcome_type,
             })
-
-            if (result.selected_outcome.outcome_type == "attacker_victory"
-                    and result.target_settlement_id):
-                target = self.settlements[result.target_settlement_id]
-                previous_id = prior_rulers.get(target.id)
-                target.ruler_id = settlement.ruler_id
-                self._remove_ruler_role_if_landless(previous_id)
 
         elif event.event_type == "rebellion":
             old_ruler_id = prior_rulers.get(settlement.id)
@@ -1181,6 +1314,10 @@ class World:
             elif isinstance(effect, StrengthenExchangeNetwork):
                 record(effect.settlement_a, "exchange_network", 1)
                 record(effect.settlement_b, "exchange_network", 1)
+            elif isinstance(effect, FoundSettlement):
+                for dimension in ("population", "food", "treasury"):
+                    record(effect.source_settlement_id, dimension, -1)
+                    record(effect.new_settlement_id, dimension, 1)
             elif isinstance(effect, (TransferControl, ChangeRuler)):
                 record(effect.settlement_id, "ruler", 1)
             elif isinstance(effect, (DamageBuilding, ModifyInfrastructure)):
@@ -1685,11 +1822,16 @@ class World:
     def to_dict(self) -> dict:
         """序列化世界状态（不含 Geography numpy 数组，可从 seed 重现）。"""
         return {
-            "schema_version": 11,
+            "schema_version": WORLD_SCHEMA_VERSION,
             "seed": self.seed,
             "name": self.name,
             "current_year": self.current_year,
             "settlements": [s.to_dict() for s in self.settlements.values()],
+            "polities": [p.to_dict() for p in self.polities.values()],
+            "settlement_control_periods": [
+                period.to_dict()
+                for period in self.settlement_control_periods.values()
+            ],
             "events": [e.to_dict() for e in self.events],
             "evidence": [e.to_dict() for e in self.evidence.values()],
             "records": [record.to_dict() for record in self.records.values()],
@@ -1711,6 +1853,7 @@ class World:
                 self._pending_disaster_aftermaths),
             "_pending_literary_spreads": list(
                 self._pending_literary_spreads),
+            "_last_founding_year": dict(self._last_founding_year),
             "_rule_cooldowns": {
                 event_type: dict(years)
                 for event_type, years in self._rule_cooldowns.items()
@@ -1723,193 +1866,156 @@ class World:
 
     @classmethod
     def from_dict(cls, data: dict) -> "World":
-        """从 dict 反序列化。Geography 需要外部重建（从 seed）。"""
-        w = cls(seed=data["seed"], name=data.get("name", "Unknown World"))
-        w.current_year = data.get("current_year", 0)
+        """Restore the current world schema and rebuild runtime managers."""
+        if data.get("schema_version") != WORLD_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported world schema: {data.get('schema_version')!r}; "
+                f"expected {WORLD_SCHEMA_VERSION}")
+
+        required = (
+            "seed", "name", "current_year", "settlements", "polities",
+            "settlement_control_periods", "events", "evidence", "records",
+            "persons", "informants", "knowledge_entries", "storage_sites",
+            "event_history_by_settlement", "_last_ruler_change",
+            "_pop_milestones", "_recent_war_years",
+            "_pending_war_settlements", "_pending_disaster_aftermaths",
+            "_pending_literary_spreads", "_last_founding_year",
+            "_rule_cooldowns", "_state_cause_sources",
+        )
+        missing = [key for key in required if key not in data]
+        if missing:
+            raise ValueError(
+                "incomplete world schema; missing: " + ", ".join(missing))
+        _validate_serialized_versions(data)
+
+        w = cls(seed=int(data["seed"]), name=data["name"])
+        w.current_year = int(data["current_year"])
         w.settlements = {
             s_data["id"]: Settlement.from_dict(s_data)
-            for s_data in data.get("settlements", [])
+            for s_data in data["settlements"]
         }
-        for settlement in w.settlements.values():
-            settlement.schema_version = 5
+        w.polities = {
+            item["id"]: Polity.from_dict(item) for item in data["polities"]
+        }
+        w.settlement_control_periods = {
+            item["id"]: SettlementControlPeriod.from_dict(item)
+            for item in data["settlement_control_periods"]
+        }
         w.persons = {
             person_data["id"]: Person.from_dict(person_data)
-            for person_data in data.get("persons", [])
+            for person_data in data["persons"]
         }
-        for person in w.persons.values():
-            person.schema_version = 2
         w.informants = {
             item["id"]: Informant.from_dict(item)
-            for item in data.get("informants", [])
+            for item in data["informants"]
         }
         w.knowledge_entries = {
             item["id"]: KnowledgeEntry.from_dict(item)
-            for item in data.get("knowledge_entries", [])
+            for item in data["knowledge_entries"]
         }
-        w._informant_mgr = InformantManager(
-            w.seed, w.informants, w.knowledge_entries)
-        for settlement in w.settlements.values():
-            if settlement.ruler_id in w.persons:
-                continue
-            legacy_id = f"person_legacy_{settlement.id}"
-            ruler = Person(
-                id=legacy_id,
-                name=settlement.ruler_name or "Unknown Ruler",
-                birth_year=w.current_year - 40,
-                settlement_id=settlement.id,
-                alive=settlement.alive,
-                death_year=(None if settlement.alive
-                            else settlement.destroyed_year),
-                roles=["ruler"],
-            )
-            w.persons[legacy_id] = ruler
-            settlement.ruler_id = legacy_id
-        w.events = [HistoricalEvent.from_dict(e) for e in data.get("events", [])]
+        w.events = [HistoricalEvent.from_dict(e) for e in data["events"]]
         w.evidence = {
             e_data["id"]: Evidence.from_dict(e_data)
-            for e_data in data.get("evidence", [])
+            for e_data in data["evidence"]
         }
         w.storage_sites = {
             site_data["id"]: StorageSite.from_dict(site_data)
-            for site_data in data.get("storage_sites", [])
+            for site_data in data["storage_sites"]
         }
-        w._storage_mgr = StorageManager(w.seed, w.storage_sites)
         w.records = {
             record_data["id"]: HistoricalRecord.from_dict(record_data)
-            for record_data in data.get("records", [])
+            for record_data in data["records"]
         }
-        w._record_gen = RecordGenerator(w.seed)
-        if w.records:
-            record_numbers = [
-                int(record_id.rsplit("_", 1)[-1])
-                for record_id in w.records
-                if record_id.rsplit("_", 1)[-1].isdigit()
-            ]
-            w._record_gen.counter = max(record_numbers, default=0)
-        else:
-            # Saves predating schema 6 stored evidence but no record layer.
-            for event in w.events:
-                generated = w._record_gen.create_records_for_event(
-                    event, EVIDENCE_RECIPES.get(event.event_type, []),
-                    w.settlements, w.persons)
-                for versions in generated.values():
-                    for record in versions:
-                        w.records[record.id] = record
-
-        records_by_carrier: dict[tuple[str, str], list[HistoricalRecord]] = {}
-        for record in w.records.values():
-            if not record.source_event_ids:
-                continue
-            key = (record.source_event_ids[0], record.carrier_subtype)
-            records_by_carrier.setdefault(key, []).append(record)
-        for versions in records_by_carrier.values():
-            versions.sort(key=lambda record: (
-                record.copy_parent_id is not None,
-                record.created_year,
-                record.id,
-            ))
-        copy_offsets: dict[tuple[str, str], int] = {}
-        for evidence in sorted(w.evidence.values(), key=lambda item: item.id):
-            if evidence.source_record_id in w.records:
-                continue
-            base_subtype = (evidence.subtype.removesuffix("_copy")
-                            if evidence.is_copy_of else evidence.subtype)
-            versions = records_by_carrier.get(
-                (evidence.event_id, base_subtype), [])
-            if not versions:
-                continue
-            if evidence.is_copy_of:
-                copies = [record for record in versions if record.copy_parent_id]
-                offset_key = (evidence.event_id, base_subtype)
-                offset = copy_offsets.get(offset_key, 0)
-                record = copies[min(offset, len(copies) - 1)] if copies else versions[0]
-                copy_offsets[offset_key] = offset + 1
-            else:
-                record = next(
-                    (item for item in versions if item.copy_parent_id is None),
-                    versions[0])
-            evidence.source_record_id = record.id
-            evidence.source_event_ids = [evidence.event_id]
-            evidence.retained_claim_ids = [
-                claim.id for claim in record.claimed_facts]
-        # Old carriers keep persisted wording.  Missing text becomes a lazy
-        # plan so a discovered copy can still materialize its root first.
-        copy_indexes: dict[str, int] = {}
-        for evidence in sorted(w.evidence.values(), key=lambda item: item.id):
-            base_subtype = evidence.subtype.removesuffix("_copy")
-            if (evidence.evidence_type != "document"
-                    and base_subtype not in PUBLIC_INSCRIPTION_SUBTYPES):
-                continue
-            copy_index = None
-            if evidence.is_copy_of:
-                copy_index = copy_indexes.get(evidence.is_copy_of, 0)
-                copy_indexes[evidence.is_copy_of] = copy_index + 1
-            initialize_text_plan(
-                evidence, w.seed, copy_index=copy_index,
-                ready=bool(evidence.content_data.get("written_content")))
-        # Older saves described several monuments as inscribed without storing
-        # the actual inscription.  Backfill the carrier text deterministically.
-        for evidence in w.evidence.values():
-            base_subtype = evidence.subtype.removesuffix("_copy")
-            if base_subtype not in PUBLIC_INSCRIPTION_SUBTYPES:
-                continue
-            if "written_content" not in evidence.content_data:
-                materialize_text_carrier(w, evidence.id)
-            tags = evidence.physical_features.setdefault("tags", [])
-            tags[:] = [
-                tag for tag in tags
-                if not tag.startswith(("script:", "legibility:", "visibility:"))
-            ]
-            tags.extend([
-                "script:monumental_letters",
-                "legibility:clear_large_letters",
-                "visibility:public_inscription",
-            ])
-        legacy_storage = "storage_sites" not in data
-        for evidence in sorted(w.evidence.values(), key=lambda item: item.id):
-            evidence.schema_version = 7
-            if (evidence.container_id in w.storage_sites
-                    and evidence.holder_id in w.storage_sites):
-                continue
-            settlement = w.settlements.get(evidence.location_id)
-            if settlement is None:
-                continue
-            record = w.records.get(evidence.source_record_id)
-            w._storage_mgr.assign_evidence(
-                evidence, settlement, evidence.created_year,
-                owner_person_id=(record.author_person_id if record else None),
-                reason="legacy_location_migration")
-        if legacy_storage:
-            for settlement in w.settlements.values():
-                if not settlement.alive:
-                    w._storage_mgr.destroy_settlement(
-                        settlement,
-                        settlement.destroyed_year or w.current_year,
-                        settlement.destruction_cause or "unknown",
-                        w.evidence)
         w.event_history_by_settlement = {
-            k: list(v) for k, v in data.get("event_history_by_settlement", {}).items()
+            k: list(v) for k, v in data["event_history_by_settlement"].items()
         }
-        w._last_ruler_change = dict(data.get("_last_ruler_change", {}))
-        w._pop_milestones = dict(data.get("_pop_milestones", {}))
-        w._recent_war_years = dict(data.get("_recent_war_years", {}))
-        w._pending_war_settlements = list(data.get("_pending_war_settlements", []))
+        w._last_ruler_change = dict(data["_last_ruler_change"])
+        w._pop_milestones = dict(data["_pop_milestones"])
+        w._recent_war_years = dict(data["_recent_war_years"])
+        w._pending_war_settlements = [
+            tuple(item) for item in data["_pending_war_settlements"]]
         w._pending_disaster_aftermaths = list(
-            data.get("_pending_disaster_aftermaths", []))
+            map(tuple, data["_pending_disaster_aftermaths"]))
         w._pending_literary_spreads = list(
-            data.get("_pending_literary_spreads", []))
+            map(tuple, data["_pending_literary_spreads"]))
+        w._last_founding_year = dict(data["_last_founding_year"])
         w._rule_cooldowns = {
             event_type: dict(years)
-            for event_type, years in data.get("_rule_cooldowns", {}).items()
+            for event_type, years in data["_rule_cooldowns"].items()
         }
         w._state_cause_sources = {
             settlement_id: dict(sources)
-            for settlement_id, sources in data.get("_state_cause_sources", {}).items()
+            for settlement_id, sources in data["_state_cause_sources"].items()
         }
-        if "informants" not in data:
-            w._informant_mgr.ensure_all_roles(w, w.current_year)
-            w._informant_mgr.rebuild_current_knowledge(w, w.current_year)
+
+        w.geography = Geography(w.seed)
+        w.geography.generate()
+        w._initialize_runtime_managers()
+        w._restore_runtime_manager_state()
+        w._validate_political_state()
+        w._pressures_cache = compute_all_pressures(w)
         return w
+
+    def _restore_runtime_manager_state(self) -> None:
+        self._settlement_mgr.counter = _max_numeric_suffix(
+            self.settlements, "stl_")
+        self._settlement_mgr.used_names = {
+            settlement.name for settlement in self.settlements.values()}
+        self._event_gen.counter = _max_numeric_suffix(
+            (event.id for event in self.events), "event_")
+        self._evidence_gen.counter = _max_numeric_suffix(
+            self.evidence, "evd_")
+        self._record_gen.counter = _max_numeric_suffix(
+            self.records, "record_")
+        self._person_mgr.counter = _max_numeric_suffix(
+            self.persons, "person_")
+        self._effect_resolver.effect_counter = _max_numeric_suffix(
+            (effect_id for event in self.events
+             for effect_id in event.effect_ids),
+            "effect_",
+        )
+        self._polity_mgr.restore_counters(
+            self.polities, self.settlement_control_periods)
+
+        for evidence in self.evidence.values():
+            written = evidence.content_data.get("written_content")
+            if not written:
+                continue
+            text = "\n".join(
+                passage.get("text", "")
+                for passage in written.get("passages", ()))
+            self._evidence_gen._document_fingerprints.add(
+                hashlib.sha256(text.encode("utf-8")).hexdigest())
+
+    def _validate_political_state(self) -> None:
+        for settlement in self.settlements.values():
+            polity = self.polities.get(settlement.controller_polity_id)
+            if polity is None:
+                raise ValueError(
+                    f"settlement {settlement.id} has no valid controller")
+            current = self.get_current_control_period(settlement.id)
+            if current is None or current.polity_id != polity.id:
+                raise ValueError(
+                    f"settlement {settlement.id} has inconsistent control")
+
+        for period in self.settlement_control_periods.values():
+            if period.settlement_id not in self.settlements:
+                raise ValueError(
+                    f"control period {period.id} references missing settlement")
+            if period.polity_id not in self.polities:
+                raise ValueError(
+                    f"control period {period.id} references missing polity")
+            if (period.end_year is not None
+                    and period.end_year < period.start_year):
+                raise ValueError(f"invalid control period {period.id}")
+
+        for polity in self.polities.values():
+            if polity.capital_settlement_id not in self.settlements:
+                raise ValueError(
+                    f"polity {polity.id} references missing capital")
+            if polity.ruler_id is not None and polity.ruler_id not in self.persons:
+                raise ValueError(
+                    f"polity {polity.id} references missing ruler")
 
     # ---- 查询接口 ----
 
@@ -1975,6 +2081,40 @@ class World:
 
 
 # ---- 模块级辅助函数 ----
+
+def _max_numeric_suffix(values, prefix: str) -> int:
+    maximum = 0
+    for value in values:
+        if not isinstance(value, str) or not value.startswith(prefix):
+            continue
+        suffix = value[len(prefix):]
+        if suffix.isdigit():
+            maximum = max(maximum, int(suffix))
+    return maximum
+
+
+def _validate_serialized_versions(data: dict) -> None:
+    expected = {
+        "settlements": 6,
+        "polities": 1,
+        "settlement_control_periods": 1,
+        "events": 3,
+        "evidence": 7,
+        "records": 1,
+        "persons": 2,
+        "informants": 1,
+        "knowledge_entries": 1,
+        "storage_sites": 1,
+    }
+    for collection, schema_version in expected.items():
+        for item in data[collection]:
+            if item.get("schema_version") != schema_version:
+                raise ValueError(
+                    f"unsupported {collection} schema for "
+                    f"{item.get('id', '<unknown>')}: "
+                    f"{item.get('schema_version')!r}; expected "
+                    f"{schema_version}")
+
 
 def _resolve_target_name(result, world):
     """解析 $TARGET_NAME 占位符——从 participants 中找对手。"""

@@ -1,5 +1,7 @@
 """Persistent informant identity, mortality, and knowledge tests."""
 
+import pytest
+
 from game.repl import GameREPL
 from simulation.informants import INFORMANT_ROLES
 from simulation.world import World
@@ -36,7 +38,11 @@ def test_dead_informants_are_replaced_but_not_resurrected():
             assert {item.role for item in active} == set(INFORMANT_ROLES)
             assert all(world.persons[item.person_id].alive for item in active)
         else:
-            assert active == []
+            assert all(
+                world.persons[item.person_id].mobility_status
+                == "ruin_survivor"
+                for item in active
+            )
 
 
 def test_knowledge_entries_belong_to_their_declared_holder():
@@ -98,7 +104,7 @@ def test_informants_and_knowledge_are_deterministic_and_serializable():
     }
 
 
-def test_legacy_world_builds_current_informants_and_knowledge():
+def test_world_rejects_missing_informant_state():
     world = World(seed=31)
     world.generate(years=10)
     legacy = world.to_dict()
@@ -106,14 +112,8 @@ def test_legacy_world_builds_current_informants_and_knowledge():
     legacy.pop("knowledge_entries")
     legacy["schema_version"] = 7
 
-    restored = World.from_dict(legacy)
-
-    assert restored.informants
-    assert restored.knowledge_entries
-    for settlement in restored.settlements.values():
-        if settlement.alive:
-            assert {item.role for item in restored.get_available_informants(
-                settlement.id)} == set(INFORMANT_ROLES)
+    with pytest.raises(ValueError, match="unsupported world schema"):
+        World.from_dict(legacy)
 
 
 def test_villager_cannot_use_local_oral_records_the_elder_does_not_hold():

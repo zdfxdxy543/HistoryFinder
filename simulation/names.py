@@ -84,7 +84,15 @@ def generate_unique_name(seed: int, used_names: set[str],
                          style: str = "settlement") -> str:
     """Derive and reserve a case-insensitively unique deterministic name."""
     normalized = {name.casefold() for name in used_names}
-    for attempt in range(1024):
+    attempt_limit = 1024
+    if style == "ruler":
+        name_space = len(RULER_PREFIXES) * len(RULER_SUFFIXES)
+        if len(normalized) >= name_space:
+            attempt_limit = 0
+        elif len(normalized) >= name_space * 3 // 4:
+            attempt_limit = 64
+
+    for attempt in range(attempt_limit):
         # Collision retries are derived from the original draw, so they do not
         # consume the simulation's random stream and alter unrelated history.
         candidate_seed = seed + attempt * 1_000_003
@@ -96,7 +104,7 @@ def generate_unique_name(seed: int, used_names: set[str],
     # This is practically unreachable, but keeps uniqueness a guarantee even
     # if a future caller creates more settlements than the word space allows.
     root = generate_name(seed, style)
-    sequence = 2
+    sequence = len(normalized) + 2
     candidate = f"{root} {sequence}"
     while candidate.casefold() in normalized:
         sequence += 1

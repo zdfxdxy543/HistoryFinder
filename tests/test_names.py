@@ -2,7 +2,7 @@
 
 import random
 
-from simulation.names import generate_name
+from simulation.names import generate_name, generate_unique_name
 from simulation.settlement import SettlementManager
 
 
@@ -37,3 +37,13 @@ def test_collision_retry_does_not_advance_simulation_rng():
 
     assert settlement.name.casefold() != colliding_name.casefold()
     assert manager.rng.random() == reference.random()
+
+
+def test_ruler_names_remain_unique_beyond_base_name_space():
+    used_names = set()
+    names = [
+        generate_unique_name(index, used_names, "ruler")
+        for index in range(2000)
+    ]
+
+    assert len({name.casefold() for name in names}) == len(names)

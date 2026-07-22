@@ -2,6 +2,8 @@
 序列化测试：验证所有核心 dataclass 的 to_dict/from_dict。
 """
 
+import pytest
+
 from simulation.world import World
 from simulation.settlement import Settlement, RelationshipData
 from simulation.events import HistoricalEvent
@@ -165,6 +167,9 @@ def test_world_roundtrip():
     assert w2.seed == 42
     assert w2.current_year == 30
     assert len(w2.settlements) == len(w1.settlements)
+    assert len(w2.polities) == len(w1.polities)
+    assert len(w2.settlement_control_periods) \
+        == len(w1.settlement_control_periods)
     assert len(w2.events) == len(w1.events)
     assert len(w2.evidence) == len(w1.evidence)
     assert len(w2.persons) == len(w1.persons)
@@ -179,12 +184,13 @@ def test_world_roundtrip():
         assert s2.population == s1.population
         assert s2.alive == s1.alive
         assert s2.ruler_id == s1.ruler_id
+        assert s2.controller_polity_id == s1.controller_polity_id
 
     for person_id, person in w1.persons.items():
         assert w2.persons[person_id].to_dict() == person.to_dict()
 
 
-def test_old_world_save_migrates_missing_document_text_to_a_lazy_plan():
+def test_world_rejects_outdated_nested_schema():
     world = World(seed=42)
     world.generate(years=1)
     data = world.to_dict()
@@ -196,15 +202,11 @@ def test_old_world_save_migrates_missing_document_text_to_a_lazy_plan():
     document_data["content_data"].pop("text_plan", None)
     document_data["schema_version"] = 3
 
-    restored = World.from_dict(data)
-    document = restored.evidence[document_data["id"]]
-    assert document.schema_version == 7
-    assert "written_content" not in document.content_data
-    assert document.content_data["text_plan"]["materialization_status"] \
-        == "planned"
+    with pytest.raises(ValueError, match="unsupported evidence schema"):
+        World.from_dict(data)
 
 
-def test_old_world_save_rebuilds_legacy_rulers():
+def test_world_rejects_incomplete_current_schema():
     world = World(seed=42)
     world.generate(years=1)
     data = world.to_dict()
@@ -212,8 +214,5 @@ def test_old_world_save_rebuilds_legacy_rulers():
     for settlement in data["settlements"]:
         settlement.pop("ruler_id")
 
-    restored = World.from_dict(data)
-    for settlement in restored.settlements.values():
-        ruler = restored.get_person(settlement.ruler_id)
-        assert ruler is not None
-        assert ruler.name == settlement.ruler_name
+    with pytest.raises(ValueError, match="missing: persons"):
+        World.from_dict(data)

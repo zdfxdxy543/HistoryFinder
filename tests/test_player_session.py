@@ -658,6 +658,25 @@ def test_world_map_travel_loads_and_reuses_local_maps():
     assert session.local_map is origin_map
 
 
+def test_world_map_exposes_public_territories_without_polity_ids():
+    world = World(seed=419)
+    world.generate(years=0)
+    world_map = PlayerSession(world).bootstrap()["world_map"]
+    territory = world_map["territory"]
+
+    assert len(territory["owners"]) == world.geography.height
+    assert len(territory["owners"][0]) == world.geography.width
+    assert territory["polities"]
+    assert all(set(polity) == {"code", "name"}
+               for polity in territory["polities"])
+    valid_codes = {polity["code"] for polity in territory["polities"]}
+    valid_codes.add(territory["unclaimed_code"])
+    assert all(code in valid_codes
+               for row in territory["owners"] for code in row)
+    assert "polity_id" not in set(_all_keys(world_map))
+    assert "controller_polity_id" not in set(_all_keys(world_map))
+
+
 def test_destroyed_settlement_loads_as_walkable_ruin_with_search_sites():
     world = World(seed=420)
     world.generate(years=0)

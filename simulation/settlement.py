@@ -80,8 +80,14 @@ class Settlement:
     destruction_cause: Optional[str] = None
     alive: bool = True
 
+    # Historical origin and current political control are separate concepts.
+    origin_settlement_id: Optional[str] = None
+    controller_polity_id: Optional[str] = None
+    founding_type: str = "initial"
+    protected_until_year: int = 0
+
     # 版本
-    schema_version: int = 5
+    schema_version: int = 6
 
     # 人口
     population: int = 100
@@ -117,12 +123,16 @@ class Settlement:
             "schema_version": self.schema_version,
             "id": self.id,
             "name": self.name,
-            "grid_x": self.grid_x,
-            "grid_y": self.grid_y,
+            "grid_x": int(self.grid_x),
+            "grid_y": int(self.grid_y),
             "founded_year": self.founded_year,
             "destroyed_year": self.destroyed_year,
             "destruction_cause": self.destruction_cause,
             "alive": self.alive,
+            "origin_settlement_id": self.origin_settlement_id,
+            "controller_polity_id": self.controller_polity_id,
+            "founding_type": self.founding_type,
+            "protected_until_year": self.protected_until_year,
             "population": self.population,
             "peak_population": self.peak_population,
             "biome": self.biome,
@@ -152,16 +162,20 @@ class Settlement:
         return cls(
             id=data["id"],
             name=data["name"],
-            grid_x=data["grid_x"],
-            grid_y=data["grid_y"],
+            grid_x=int(data["grid_x"]),
+            grid_y=int(data["grid_y"]),
             founded_year=data["founded_year"],
             destroyed_year=data.get("destroyed_year"),
             destruction_cause=data.get("destruction_cause"),
             alive=data.get("alive", True),
-            schema_version=data.get("schema_version", 1),
+            origin_settlement_id=data["origin_settlement_id"],
+            controller_polity_id=data["controller_polity_id"],
+            founding_type=data["founding_type"],
+            protected_until_year=int(data["protected_until_year"]),
+            schema_version=int(data["schema_version"]),
             population=data.get("population", 100),
             peak_population=data.get("peak_population", 100),
-            biome=data.get("biome", "plains"),
+            biome=str(data.get("biome", "plains")),
             size=data.get("size", "village"),
             food_surplus=data.get("food_surplus", 0.0),
             wealth=data.get("wealth", 0.0),
@@ -196,6 +210,13 @@ class SettlementManager:
         self.counter += 1
         return f"stl_{self.counter:04d}"
 
+    def reserve_id(self) -> str:
+        return self._next_id()
+
+    def reserve_name(self) -> str:
+        seed = self.rng.randint(0, 100000)
+        return self.unique_namer(seed, self.used_names, "settlement")
+
     def create_settlement(self, x: int, y: int, year: int,
                           biome: str, initial_pop: int = 100) -> Settlement:
         """在指定位置创建一个新聚落。"""
@@ -218,12 +239,12 @@ class SettlementManager:
         return Settlement(
             id=self._next_id(),
             name=name,
-            grid_x=x,
-            grid_y=y,
+            grid_x=int(x),
+            grid_y=int(y),
             founded_year=year,
             population=initial_pop,
             peak_population=initial_pop,
-            biome=biome,
+            biome=str(biome),
             ruler_name=ruler,
             food_stock=food_stock_defaults.get(biome, 400.0),
             treasury=treasury_defaults.get(biome, 150.0),

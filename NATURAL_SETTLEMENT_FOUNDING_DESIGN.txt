@@ -1,0 +1,1300 @@
+HistoryFinder 自然建城与政治归属开发方案
+=========================================
+
+文档状态
+--------
+
+本文是“历史模拟中的自然建城”功能的实现规格，可直接作为开发任务说明使用。
+本期目标不是让玩家手动建城，也不是只增加初始聚落数量，而是让已经运行的历史模拟
+根据人口、经济、地理和政治条件，在年度推进中产生新的聚落，并留下可调查的历史记录。
+
+本文同时引入最小政治归属模型，为下一阶段的行政区划奠定数据基础；本期不实现完整的
+省、郡、县等行政层级，也不制作对应的玩家 UI。
+
+
+一、必须先理解的现状
+====================
+
+1. 当前聚落只在 World.generate() 的初始化阶段创建
+--------------------------------------------------
+
+当前流程位于 simulation/world.py：
+
+1) Geography.generate() 生成地理；
+2) pick_settlement_sites() 一次性选择初始位置；
+3) SettlementManager.create_settlement() 创建 Settlement；
+4) World._create_initial_ruler_and_heir() 创建统治者与继承人；
+5) InformantManager.ensure_settlement_roles() 创建当地知情人；
+6) EventGenerator.generate_founding_event() 生成建城事件；
+7) World._add_event_with_evidence() 生成记录、证据和保管地点。
+
+运行中的年度模拟没有创建聚落的正式入口。
+
+
+2. Settlement 目前混合了地点和政治主体语义
+--------------------------------------------
+
+Settlement 是一个地理聚居点，但外交关系、战争和 TransferControl 又把聚落当作国家。
+尤其是 TransferControl 当前通过复制另一个聚落的 ruler_name 表示征服，这只是临时行为，
+不能支持“一国控制多个聚落”，也不能支持未来的行政区划。
+
+本期必须把以下概念分开：
+
+- Settlement：物理地点和当地人口；
+- Polity：实施政治统治的实体；
+- SettlementControlPeriod：某聚落在某段时间由哪个 Polity 控制的历史事实。
+
+行政区 AdministrativeUnit 暂不实现，但未来应挂在 Polity 下，而不是把母聚落直接作为
+行政父节点。
+
+
+3. EffectResolver 的事务限制
+----------------------------
+
+EffectResolver.apply_effects() 会先对整组 effect 调用 validate()，然后才逐个 apply()。
+因此下面的组合必然失败：
+
+    CreateSettlement(new_id)
+    RelocatePopulation(source_id, new_id, count)
+
+第二个 effect 在预校验阶段看不到尚未创建的新聚落。自然建城必须使用单个复合效果
+FoundSettlement，或者修改整个事务系统支持顺序依赖。为了控制本期风险，本文规定使用
+单个 FoundSettlement 复合效果，不重写 EffectResolver 的通用事务机制。
+
+
+4. 动态创建要求修复序列化后的 ID 计数器
+-----------------------------------------
+
+World.from_dict() 当前没有完整恢复 SettlementManager、EventGenerator、EvidenceGenerator、
+PersonManager 和 EffectResolver 的计数器。只要读档后继续生成实体，就可能出现重复 ID。
+该问题必须和自然建城一起修复，否则“新建成功但覆盖旧对象”会造成严重数据损坏。
+
+
+二、目标和非目标
+================
+
+本期必须实现
+------------
+
+1. 世界生成后的年度模拟可以自然产生新聚落。
+2. 第一种建城类型为 planned_colony，即稳定母聚落组织的计划殖民。
+3. 新聚落人口、粮食和财政来自母聚落，核心资源守恒。
+4. 新聚落位置由动态选址器决定，而不是直接使用初始化选址函数。
+5. 新聚落拥有建城者、当地统治者、继承人和知情人。
+6. 新聚落产生 founding 历史事件、记录、实物证据和口述传统。
+7. 新聚落默认继承母聚落的政治归属。
+8. 初始聚落拥有明确的 Polity；征服改变 Polity 控制权，而不是复制统治者名称。
+9. 存档往返、固定 seed 的确定性和所有现有测试保持通过。
+10. 世界地图和查询接口自动包含动态建立的聚落，无需专门前端操作。
+
+
+本期明确不实现
+--------------
+
+1. 玩家手动选择地点或点击“建城”。
+2. 完整行政区层级、税区、官职体系和疆域多边形。
+3. 难民聚落、贸易站、军事前哨、宗教殖民地和政治分裂建城。
+4. 多年建设中的营地实体。
+5. 道路寻路、海运和精确旅行成本。
+6. 聚落废弃后在同一格重建。
+7. 玩家会话存档功能。
+
+以上非目标不得阻止数据模型为未来功能保留清晰扩展点。
+
+
+三、不可破坏的领域约束
+======================
+
+实现和测试必须共同保证以下不变量：
+
+1. 一个地图格最多有一个 Settlement，包括现存聚落和废墟。
+2. 新聚落必须位于地图范围内，且 geography.suitability[y, x] > 0。
+3. ocean、lake、river、mountain 不能直接建立聚落。
+4. 新聚落与所有既有聚落的曼哈顿距离不得小于动态建城最小距离。
+5. settler_count 必须从母聚落人口中扣除；不能凭空增加总人口。
+6. 母聚落在迁出后必须至少保留规定人口。
+7. 转移给新聚落的粮食和财政必须从母聚落扣除。
+8. 每个现存聚落必须有且只有一个当前有效的 SettlementControlPeriod。
+9. 一个 SettlementControlPeriod 的 end_year 为 None 表示当前有效。
+10. 同一聚落的控制时期不得重叠。
+11. 新聚落的 founded_year 必须等于建城事件 year。
+12. 新聚落必须出现在自己的 event_history_by_settlement 中；母聚落也必须记录该建城事件。
+13. 新聚落第一年不参加普通战争、叛乱、贸易和再次建城判定。
+14. 固定 seed 和 years 必须生成完全相同的聚落 ID、位置、年份、人口和政治归属。
+15. 读档后继续推进不得产生任何重复 ID。
+
+
+四、配置项
+==========
+
+在 config.py 的聚落参数区域新增以下常量。第一版使用这些明确数值，不要把数值散落在
+业务代码中：
+
+    # ---- 动态建城参数 ----
+    DYNAMIC_FOUNDING_ENABLED = True
+    DYNAMIC_FOUNDING_MIN_YEAR = 15
+    DYNAMIC_FOUNDING_MIN_SOURCE_POPULATION = 180
+    DYNAMIC_FOUNDING_SOURCE_POPULATION_RESERVE = 110
+    DYNAMIC_FOUNDING_MIN_SETTLERS = 50
+    DYNAMIC_FOUNDING_MAX_SETTLERS = 120
+    DYNAMIC_FOUNDING_SETTLER_FRACTION = 0.28
+    DYNAMIC_FOUNDING_MIN_STABILITY = 0.68
+    DYNAMIC_FOUNDING_MIN_LEGITIMACY = 0.62
+    DYNAMIC_FOUNDING_MAX_FOOD_SHORTAGE = 0.05
+    DYNAMIC_FOUNDING_MIN_TREASURY = 260.0
+    DYNAMIC_FOUNDING_TREASURY_FRACTION = 0.18
+    DYNAMIC_FOUNDING_FOOD_MONTHS = 9.0
+    DYNAMIC_FOUNDING_COOLDOWN_YEARS = 12
+    DYNAMIC_FOUNDING_PROTECTION_YEARS = 3
+    DYNAMIC_FOUNDING_MIN_DISTANCE = 10
+    DYNAMIC_FOUNDING_SEARCH_RADIUS_BASE = 28
+    DYNAMIC_FOUNDING_MIN_SUITABILITY = 0.34
+    DYNAMIC_FOUNDING_MAX_WORLD_SETTLEMENTS = 100
+    DYNAMIC_FOUNDING_MAX_PER_YEAR = 1
+    DYNAMIC_FOUNDING_BASE_PROBABILITY = 0.015
+    DYNAMIC_FOUNDING_PROBABILITY_SCALE = 1.0
+    DYNAMIC_FOUNDING_MAX_PROBABILITY = 0.22
+
+说明：
+
+- 初始选址继续使用 MIN_SETTLEMENT_DISTANCE，不要改变既有的初始布局算法。
+- 动态建城使用独立的 DYNAMIC_FOUNDING_MIN_DISTANCE。
+- MAX_WORLD_SETTLEMENTS 统计现存聚落和废墟，防止 ID 数量及地图标记无限增长。
+- 测试可以 monkeypatch 这些常量或直接测试规划器，不要为了提高测试触发率修改生产值。
+
+
+五、数据模型
+============
+
+1. 新建 simulation/polity.py
+---------------------------
+
+新增以下 dataclass。字段名称按本文实现，不要用 Settlement 代替 polity_id。
+
+    @dataclass
+    class Polity:
+        id: str
+        name: str
+        founded_year: int
+        capital_settlement_id: str
+        ruler_id: str | None = None
+        dissolved_year: int | None = None
+        alive: bool = True
+        schema_version: int = 1
+
+        def to_dict(self) -> dict: ...
+
+        @classmethod
+        def from_dict(cls, data: dict) -> "Polity": ...
+
+
+    @dataclass
+    class SettlementControlPeriod:
+        id: str
+        settlement_id: str
+        polity_id: str
+        start_year: int
+        end_year: int | None = None
+        reason: str = "founding"
+        event_id: str | None = None
+        schema_version: int = 1
+
+        def to_dict(self) -> dict: ...
+
+        @classmethod
+        def from_dict(cls, data: dict) -> "SettlementControlPeriod": ...
+
+
+新增 PolityManager：
+
+    class PolityManager:
+        def __init__(self, seed: int):
+            self.seed = seed
+            self.polity_counter = 0
+            self.control_counter = 0
+
+        def create_polity(...): ...
+        def begin_control(...): ...
+        def restore_counters(polities, control_periods): ...
+
+ID 格式固定为：
+
+- polity_0001
+- control_000001
+
+Polity 名称使用 simulation.names.generate_unique_name(..., "kingdom")。必须维护 used_names，
+并在 from_dict() 后从已有 polity 名称恢复 used_names。
+
+
+2. 修改 Settlement
+------------------
+
+在 simulation/settlement.py 的 Settlement 中增加：
+
+    origin_settlement_id: str | None = None
+    controller_polity_id: str | None = None
+    founding_type: str = "initial"
+    protected_until_year: int = 0
+
+字段语义：
+
+- origin_settlement_id 只表达历史来源，不表达当前行政隶属；
+- controller_polity_id 是当前控制权的缓存字段，权威历史来自 control_periods；
+- founding_type 第一版允许 initial 和 planned_colony；
+- protected_until_year 用于阻止新聚落立即触发高影响事件和再次殖民。
+
+将 Settlement.schema_version 提升为 6，并更新 to_dict()/from_dict()。以上字段属于 schema 6
+必填字段；from_dict() 不为缺失字段提供默认值。
+
+
+3. 修改 World
+-------------
+
+在 World 增加持久化字段：
+
+    polities: dict[str, Polity] = field(default_factory=dict)
+    settlement_control_periods: dict[str, SettlementControlPeriod] = field(
+        default_factory=dict)
+
+增加运行时管理器：
+
+    _polity_mgr: PolityManager | None = None
+
+增加追踪状态：
+
+    _last_founding_year: dict[str, int] = field(default_factory=dict)
+
+其中 key 是母聚落 ID，value 是它最近一次成功建立殖民聚落的年份。
+
+World.to_dict() schema_version 从 11 提升到 12，并序列化上述字段。
+
+
+4. 不要在本期增加 AdministrativeUnit
+------------------------------------
+
+下一阶段建议的数据结构如下，但本期不要创建空壳类：
+
+    AdministrativeUnit
+        id
+        polity_id
+        parent_unit_id
+        unit_type
+        capital_settlement_id
+        founded_year
+        dissolved_year
+
+    AdministrativeAssignment
+        settlement_id
+        administrative_unit_id
+        start_year
+        end_year
+        event_id
+
+本期的 Polity 和 SettlementControlPeriod 已经足够保证下一阶段无需修改 Settlement 的
+地理身份，也无需把 origin_settlement_id 错用为行政父级。
+
+
+六、初始化政治实体
+==================
+
+重构 World.generate() 的初始聚落创建流程：
+
+1. 每个初始聚落仍按原逻辑创建。
+2. 创建初始统治者和继承人。
+3. 为该聚落创建一个独立 Polity：
+   - capital_settlement_id = settlement.id
+   - ruler_id = settlement.ruler_id
+   - founded_year = 0
+4. settlement.controller_polity_id = polity.id。
+5. 创建 start_year=0、reason="founding" 的控制时期。
+6. 创建原有 founding event。
+7. founding event ID 写入控制时期的 event_id。
+
+初始世界仍然是“一聚落一政权”，这样不会在功能上线时无依据地合并现有聚落。
+自然建城发生后，一个政权才会开始控制多个聚落。
+
+建议把重复逻辑提取成两个 World 私有方法：
+
+    def _create_initial_settlement(self, x: int, y: int, year: int) -> Settlement
+    def _create_initial_polity(self, settlement: Settlement,
+                               ruler: Person, event_id: str | None = None) -> Polity
+
+动态建城不得直接调用 _create_initial_settlement()，因为动态建城有资源转移和母聚落来源。
+
+
+七、动态选址器
+==============
+
+新建 simulation/founding.py，放置动态建城的纯规划逻辑。不要把选址代码塞进
+event_rules.py 或 World._tick_year()。
+
+
+1. 数据对象
+-----------
+
+    @dataclass(frozen=True)
+    class FoundingSiteCandidate:
+        x: int
+        y: int
+        biome: str
+        suitability: float
+        distance_from_source: int
+        nearest_settlement_distance: int
+        travel_cost: float
+        site_score: float
+
+
+    @dataclass(frozen=True)
+    class FoundingPlan:
+        source_settlement_id: str
+        x: int
+        y: int
+        biome: str
+        settler_count: int
+        food_transfer: float
+        treasury_transfer: float
+        founder_person_id: str
+        controller_polity_id: str
+        founding_type: str
+        trigger_factors: dict[str, float]
+        site_factors: dict[str, float]
+
+这两个对象是当年计算的临时规划，不进入 World.to_dict()。
+
+
+2. 搜索范围
+-----------
+
+实现：
+
+    def find_founding_sites(world: World,
+                            source: Settlement) -> list[FoundingSiteCandidate]
+
+搜索以母聚落为中心、曼哈顿距离不超过 search_radius 的格子：
+
+    search_radius = DYNAMIC_FOUNDING_SEARCH_RADIUS_BASE + min(
+        12, int(source.technology_level * 2)
+    )
+
+过滤条件按以下顺序执行：
+
+1. 地图边界内；
+2. 与母聚落距离至少 DYNAMIC_FOUNDING_MIN_DISTANCE；
+3. geography.suitability[y, x] >= DYNAMIC_FOUNDING_MIN_SUITABILITY；
+4. biome 不属于 ocean/lake/river/mountain；
+5. 该格没有任何 Settlement，包括废墟；
+6. 与所有 Settlement 的曼哈顿距离至少 DYNAMIC_FOUNDING_MIN_DISTANCE。
+
+不要只检查 alive settlement，否则殖民地可能覆盖废墟，破坏地点和证据定位。
+
+
+3. 评分公式
+-----------
+
+第一版使用以下公式，所有分量限制在 [0, 1]：
+
+    suitability_score = geography.suitability[y, x]
+    distance_score = 1 - clamp(
+        (distance_from_source - min_distance) /
+        max(search_radius - min_distance, 1)
+    )
+    spacing_score = clamp(
+        nearest_settlement_distance / max(search_radius, 1)
+    )
+    biome_affinity = {
+        "river_valley": 1.00,
+        "grassland": 0.90,
+        "forest": 0.78,
+        "plains": 0.74,
+        "scrubland": 0.48,
+        "highland": 0.45,
+        "desert": 0.25,
+        "tundra": 0.22,
+    }.get(biome, 0.20)
+
+    site_score = (
+        0.55 * suitability_score
+        + 0.20 * distance_score
+        + 0.15 * spacing_score
+        + 0.10 * biome_affinity
+    )
+
+travel_cost 第一版等于 distance_from_source / search_radius，限制在 [0, 1]。
+
+返回结果按以下 key 降序排序：
+
+    (-site_score, distance_from_source, y, x)
+
+注意：不要在 numpy 全图排序结果上依赖未定义的相同值顺序。
+
+
+4. 确定性随机选择
+----------------
+
+不要永远选择第一名，也不要使用共享 rng 的临时调用次数决定结果。
+从前 5 个候选中进行加权选择，随机源固定为：
+
+    random.Random(
+        f"{world.seed}|planned_colony|{source.id}|{world.current_year}"
+    )
+
+权重为 max(candidate.site_score, 0.01) ** 3。
+
+这样同一 seed、来源聚落和年份总会选择相同地点，且新增不相关随机调用不会改变结果。
+
+
+八、建城触发规划
+================
+
+动态建城不是普通 EventRule 的简单 outcome。普通 EventRule 的 effect 模板主要修改已经
+存在的实体，而且 _evaluate_rules_and_apply() 的 alive 列表在年初已经确定。为降低耦合，
+本期新增独立的 SettlementFoundingPlanner，并在年度阶段中调用。
+
+
+1. SettlementFoundingPlanner
+----------------------------
+
+在 simulation/founding.py 实现：
+
+    class SettlementFoundingPlanner:
+        def evaluate(self, world: World, source: Settlement,
+                     year: int) -> FoundingPlan | None: ...
+
+
+2. 硬条件
+---------
+
+任一条件不满足即返回 None：
+
+1. DYNAMIC_FOUNDING_ENABLED 为 True；
+2. year >= DYNAMIC_FOUNDING_MIN_YEAR；
+3. len(world.settlements) < DYNAMIC_FOUNDING_MAX_WORLD_SETTLEMENTS；
+4. source.alive；
+5. year > source.protected_until_year；
+6. source.population >= DYNAMIC_FOUNDING_MIN_SOURCE_POPULATION；
+7. source.stability >= DYNAMIC_FOUNDING_MIN_STABILITY；
+8. source.legitimacy >= DYNAMIC_FOUNDING_MIN_LEGITIMACY；
+9. source.food_shortage <= DYNAMIC_FOUNDING_MAX_FOOD_SHORTAGE；
+10. source.treasury >= DYNAMIC_FOUNDING_MIN_TREASURY；
+11. source.controller_polity_id 指向一个 alive polity；
+12. 距离 _last_founding_year[source.id] 至少 cooldown 年；
+13. 存在合格选址；
+14. 存在可担任建城者的历史人物。
+
+
+3. 倾向因子和概率
+----------------
+
+使用已有 expansion_pressure，但不要只使用它，因为当前 expansion_pressure 在人口 1500
+附近才达到高值，会使 650-1000 人的聚落几乎永不殖民。
+
+    population_factor = clamp(
+        (source.population - min_source_population) / 1000.0
+    )
+    expansion_pressure = world.get_pressure(source.id, "expansion_pressure")
+    stability_factor = clamp(
+        (source.stability - min_stability) / (1.0 - min_stability)
+    )
+    treasury_factor = clamp(
+        (source.treasury - min_treasury) / 700.0
+    )
+    site_factor = best_site.site_score
+
+    probability = clamp(
+        DYNAMIC_FOUNDING_BASE_PROBABILITY
+        + 0.07 * population_factor
+        + 0.05 * expansion_pressure
+        + 0.03 * stability_factor
+        + 0.03 * treasury_factor
+        + 0.04 * site_factor,
+        0.0,
+        DYNAMIC_FOUNDING_MAX_PROBABILITY,
+    )
+
+掷骰随机源固定为：
+
+    random.Random(
+        f"{world.seed}|founding_roll|{source.id}|{year}"
+    ).random()
+
+不要复用 World._tick_year() 的共享 rng，否则其他事件规则数量变化会改变建城历史。
+
+
+4. 移民数量和资源
+----------------
+
+    desired = round(source.population * DYNAMIC_FOUNDING_SETTLER_FRACTION)
+    settler_count = clamp integer desired to [MIN_SETTLERS, MAX_SETTLERS]
+    settler_count = min(
+        settler_count,
+        source.population - SOURCE_POPULATION_RESERVE,
+    )
+
+如果最终 settler_count < MIN_SETTLERS，返回 None。
+
+粮食转移：
+
+    per_capita_annual_need = 10.0
+    desired_food = settler_count * per_capita_annual_need \
+                   * DYNAMIC_FOUNDING_FOOD_MONTHS / 12
+    food_transfer = min(desired_food, source.food_stock * 0.35)
+
+要求转移后母聚落至少保留 3 个月口粮；不满足则返回 None。
+
+财政转移：
+
+    treasury_transfer = min(
+        source.treasury * DYNAMIC_FOUNDING_TREASURY_FRACTION,
+        120.0,
+    )
+
+要求转移后母聚落 treasury >= 100.0；不满足则返回 None。
+
+
+5. 建城者选择
+-------------
+
+从以下人物中选择：
+
+- alive；
+- current_location_id == source.id；
+- 年龄 22 到 60；
+- 不是当前 polity ruler；
+- travel_role 为空；
+- 优先 roles 包含 heir、general、merchant、artisan；
+- 同等优先级按 person.id 排序，再使用稳定随机选择。
+
+如果没有合适人物，本年不产生 FoundingPlan。第一版不要在 planner 内创建人物；planner
+必须保持纯计算，失败的建城 roll 也不能在世界中遗留一个无事件来源的新人物。未来若需要
+“无名移民推举领袖”，应另外设计可回滚的 CreatePerson effect。
+
+建城成功后：
+
+- founder.settlement_id 改为新聚落，表示永久家乡归属发生改变；
+- founder.current_location_id 改为新聚落；
+- mobility_status = "resident"；
+- travel_role = ""；
+- 移除 heir 角色，添加 colonist_leader、founder 和 ruler 角色；
+- 在 movement_history 记录 movement_type="colony_founding"。
+
+当前 MovePerson 有意保留 settlement_id 作为家乡，不适合永久殖民，因此该变化由
+FoundSettlement 复合效果负责，不要复用 MovePerson。
+
+
+九、FoundSettlement 复合效果
+============================
+
+在 simulation/effects.py 新增：
+
+    @dataclass
+    class FoundSettlement:
+        effect_type: ClassVar[str] = "found_settlement"
+        source_settlement_id: str
+        new_settlement_id: str
+        new_settlement_name: str
+        grid_x: int
+        grid_y: int
+        founded_year: int
+        biome: str
+        settler_count: int
+        food_transfer: float
+        treasury_transfer: float
+        founder_person_id: str
+        controller_polity_id: str
+        control_period_id: str
+        founding_type: str = "planned_colony"
+        reason: str = "planned_colony"
+
+
+1. ID 和名称必须在 apply 前预留
+-----------------------------
+
+SettlementManager 增加：
+
+    def reserve_id(self) -> str
+    def reserve_name(self) -> str
+
+或者保留 _next_id()，但由 World._execute_founding_plan() 在构造 effect 前调用。
+一旦预留后事务失败，计数器不回退，允许 ID 出现空洞；绝不能复用失败事务的 ID。
+
+新名称必须加入 used_names。名称生成随机源必须来自 SettlementManager 自身的确定性 rng。
+
+
+2. validate()
+-------------
+
+必须检查：
+
+- source 存在且 alive；
+- new_settlement_id 尚不存在；
+- new_settlement_name 不与现有聚落重名；
+- 坐标、地形、suitability 和距离全部合法；
+- source 人口和资源足够，转移后满足保留值；
+- founder 存在、alive 且位于 source；
+- polity 存在且 alive；
+- control_period_id 尚不存在；
+- founded_year == world.current_year。
+
+即使 planner 已经校验过，也必须在 effect.validate() 重复领域不变量检查。
+
+
+3. apply()
+----------
+
+apply() 按以下顺序完成核心状态变更：
+
+1. 保存 source 的 population、peak_population、food_stock、treasury；
+2. 保存 founder 的完整归属、角色和 movement_history；
+3. 从 source 扣除 settler_count、food_transfer、treasury_transfer；
+4. 直接构造新 Settlement；不要再次调用会生成 ID/名称的 create_settlement()，因为 ID 和
+   名称已经在 effect 构造前预留：
+   - population = peak_population = settler_count
+   - food_stock = food_transfer
+   - treasury = treasury_transfer
+   - stability = clamp(source.stability - 0.05, 0.55, 0.85)
+   - legitimacy = clamp(source.legitimacy - 0.03, 0.55, 0.85)
+   - cultural_influence = source.cultural_influence * 0.70
+   - theoretical_knowledge = source.theoretical_knowledge * 0.65
+   - technology_level = source.technology_level * 0.85
+   - origin_settlement_id = source.id
+   - controller_polity_id = polity.id
+   - founding_type = planned_colony
+   - protected_until_year = founded_year + protection_years
+   - ruler_id/ruler_name = founder
+5. 插入 world.settlements[new_id]；
+6. 初始化：
+   - event_history_by_settlement[new_id] = []
+   - _last_ruler_change[new_id] = founded_year
+   - _pop_milestones[new_id] = 第一个严格大于 population 的里程碑；
+7. 更新 founder 的永久归属和角色；
+8. 创建 SettlementControlPeriod 并插入 world.settlement_control_periods；
+9. 返回 EffectResult，snapshot_before 必须包含回滚以上所有变化所需数据。
+
+注意：apply() 不创建事件、证据、继承人和知情人。它只负责可回滚的核心领域状态。
+
+
+4. rollback
+-----------
+
+在 EffectResolver._rollback_one() 增加 FoundSettlement 分支：
+
+1. 删除新聚落；
+2. 删除 control period；
+3. 删除新聚落的 tracking map 项；
+4. 恢复 source 资源；
+5. 恢复 founder 全部字段；
+6. 不回退任何 manager counter。
+
+同时 effect_to_dict() 会通过 asdict 自动支持该 effect，但测试必须确认 effect_type 和所有
+关键字段进入 HistoricalEvent.effects。
+
+
+十、执行建城计划
+================
+
+在 World 中新增：
+
+    def _evaluate_natural_founding(self, year: int) -> list[str]: ...
+    def _execute_founding_plan(self, plan: FoundingPlan,
+                               year: int) -> HistoricalEvent | None: ...
+
+
+1. 年度阶段位置
+-----------
+
+修改 _tick_year() 为：
+
+Phase A：气候
+Phase B：现有聚落人口和经济
+Phase B2：人物移动和死亡/继承
+Phase B3：确保既有聚落知情人角色
+Phase C：计算既有聚落压力
+Phase C2：评估并执行自然建城
+Phase D/E：普通规则和效果
+Phase F：环境事件
+Phase G：事件链
+Phase H：证据衰减
+
+自然建城放在压力计算后，才能使用当年最新经济状态。普通规则使用年初保存的 alive 列表，
+所以新聚落不会在建城当年参加普通事件，这正是期望行为。
+
+不要在建城后立刻重新计算全世界压力；新聚落的压力从下一年开始计算。
+
+
+2. 每年选择来源聚落
+-------------------
+
+候选来源必须按 settlement.id 排序后逐个 evaluate，不能依赖 dict 插入顺序。
+收集成功 roll 的 FoundingPlan 后，按以下顺序排序：
+
+    (-expansion_pressure, -site_score, source_settlement_id)
+
+只执行前 DYNAMIC_FOUNDING_MAX_PER_YEAR 个。
+
+如果多个计划选中彼此过近的位置，依次执行时后一个 FoundSettlement.validate() 会失败；
+失败计划本年不重选位置，防止执行顺序产生额外随机分支。
+
+
+3. 执行顺序
+-----------
+
+_execute_founding_plan()：
+
+1. 从 manager 预留 settlement ID、名称和 control period ID；
+2. 构造 FoundSettlement；
+3. 调用 EventGenerator.reserve_id() 预先生成 founding event ID，确保后续所有引用一致；
+4. FoundSettlement 不需要持有 event_id，人物 movement_history 在 effect 成功后补写；
+5. EffectResolver.apply_effects([effect], world)；
+6. 若失败，返回 None；
+7. 取得新 settlement；
+8. 为新聚落创建继承人；如果 founder 原本是母聚落 heir，也为母聚落当前 ruler 补任继承人；
+9. InformantManager.ensure_settlement_roles(world, new_settlement, year)；
+10. 构造并添加 founding event、records 和 evidence；
+11. 将 event.id 同步写入 control period.event_id 和 founder movement_history；
+12. _last_founding_year[source.id] = year；
+13. 返回 event。
+
+继承人使用现有 _ensure_heir(founder, year)，但要确认它创建的人物 settlement_id 是新聚落，
+而不是 founder 原来的母聚落。由于 founder 已在 effect 中更改归属，此调用应自然成立。
+母聚落补任继承人时，先取得母聚落当前 ruler，再调用 _ensure_heir(source_ruler, year)；只有
+founder 在 effect 前确实拥有 heir 角色时才需要这一步。
+
+
+十一、建城事件、记录与证据
+==========================
+
+1. 扩展 EventGenerator.generate_founding_event()
+---------------------------------------------
+
+EventGenerator 增加公开的 reserve_id()，内部仍使用同一个 counter。现有初始化调用可以
+继续省略新增参数；为 generate_founding_event() 增加可选参数：
+
+    def generate_founding_event(
+        settlement_id,
+        settlement_name,
+        year,
+        founder_name,
+        founder_id=None,
+        origin_settlement_id=None,
+        origin_settlement_name=None,
+        settler_count=None,
+        controller_polity_id=None,
+        founding_type="initial",
+        reserved_event_id=None,
+    )
+
+当 reserved_event_id 不为 None 时，generate_founding_event() 必须直接使用该 ID，不能再次
+递增 counter；未传该参数时仍由 reserve_id() 生成 ID。
+
+动态建城事件：
+
+- event_type = "founding"，继续复用现有证据配方；
+- primary_location = 新聚落；
+- participants = [新聚落, 母聚落]，去重；
+- person_ids = [founder_id]；
+- details 包含：
+  - founder / founder_id
+  - founding_type
+  - origin_settlement_id / origin_settlement_name
+  - settler_count
+  - controller_polity_id
+  - description_cn
+- trigger_factors 合并 FoundingPlan.trigger_factors 和 site_factors；
+- cause_event_ids = World._find_cause_events(
+      origin_settlement_id, year, "founding", trigger_factors)
+  ，从母聚落近年的正向人口、粮食和财政变化中提取最多 3 个直接原因；
+- importance_score 建议 0.72；
+- visibility_score 建议 0.85。
+
+动态描述模板：
+
+    {year}年，{founder_name}带领{settler_count}名来自
+    {origin_settlement_name}的移民，在此建立了{settlement_name}。
+
+不要在玩家可见层直接暴露内部 polity ID；它只存在于真相层记录中。
+
+World._record_effect_sources() 增加 FoundSettlement 分支：对母聚落记录 population、food、
+treasury 的负向变化；对新聚落记录 population、food、treasury 的正向来源，event_id 均为
+建城事件。这使后续事件能够把建城识别为新聚落状态的直接历史原因。
+
+
+2. event history
+----------------
+
+由于 participants 同时包含新聚落和母聚落，World._add_event() 会把同一事件加入两地历史。
+必须保证在调用 _add_event_with_evidence() 前，新聚落已存在且其 history 列表已初始化。
+
+
+3. 证据第一版范围
+-----------------
+
+第一版继续复用 EVIDENCE_RECIPES["founding"]：
+
+- founding_charter
+- foundation_stone
+- founding_legend
+
+它们默认位于新聚落。必须确保 written_content 能读取 origin_settlement_name、settler_count
+和 founding_type，并让殖民建城文书提到母聚落、移民人数和授权来源。
+
+建议同步修改 simulation/written_content.py：
+
+- initial founding 保持现有文本；
+- planned_colony 的 founding_charter 写明来自母聚落的移民和建城者；
+- foundation_stone 提到母聚落来源；
+- 不自动声称政治归属“永远有效”，只记录当时的授权或宣称。
+
+母聚落保存授权书副本是后续增强，不列为本期验收阻塞项。若实现，必须通过正式的抄本和
+TransferEvidence 流程完成，不能简单复制同一个 evidence ID 到两个地点。
+
+
+十二、控制权和战争语义修复
+==========================
+
+自然建城会让一个 polity 控制多个 settlement。如果战争仍在同 polity 聚落之间随机选敌人，
+系统会很快让母城攻击自己的殖民地。因此本期必须完成以下最小修复。
+
+
+1. TransferControl
+------------------
+
+保留类名，但修改语义：
+
+- old_controller_id 和 new_controller_id 都是 polity ID；
+- validate() 检查目标聚落及 new polity 存在；
+- apply()：
+  1) 找到并关闭旧的当前 control period，end_year = world.current_year；
+  2) 创建新的 control period，start_year = world.current_year；
+  3) settlement.controller_polity_id = new_controller_id；
+  4) 不修改 settlement.ruler_name 或 ruler_id；
+- snapshot 保存旧 controller、被关闭时期和新时期 ID；
+- rollback 删除新时期并恢复旧时期。
+
+战胜方 effect 模板当前传入的是攻击方 settlement ID。将战争模板明确改成：
+
+    TransferControl(
+        "$PARTNER",
+        new_controller_id="$SETTLEMENT_POLITY",
+        reason="conquest",
+    )
+
+resolve_placeholders() 增加：
+
+    "$SETTLEMENT_POLITY" -> settlement.controller_polity_id
+    "$PARTNER_POLITY" -> partner.controller_polity_id
+
+不要根据字段名临时猜测 "$SETTLEMENT" 的含义；普通 effect 中该占位符继续始终表示
+settlement.id。
+
+
+2. 战争对象过滤
+---------------
+
+EventRule._select_partner() 对 event_type == "war" 时排除：
+
+    other.controller_polity_id == settlement.controller_polity_id
+
+controller_polity_id 是当前 schema 的必填有效引用，不提供缺失值 fallback。
+
+贸易仍允许同 polity 聚落之间发生，因此 trade 不做该过滤。
+
+
+3. 地方统治者和 polity 统治者的最小同步
+-------------------------------------
+
+本期 Settlement.ruler_id/ruler_name 仍表示当地统治者；Polity.ruler_id 表示政治实体统治者。
+殖民地 founder 成为当地统治者，但母 polity 的 ruler 不变。
+
+现有 _apply_succession() 完成聚落统治者继承后，必须检查该聚落是否是其 polity 的首都：
+
+- 如果 settlement.id == polity.capital_settlement_id；
+- 且 polity.ruler_id == old_ruler.id；
+- 则 polity.ruler_id = new_ruler.id。
+
+非首都聚落继承不改变 polity.ruler_id。本期不实现地方官任命、首都迁移和跨聚落王朝继承，
+但不能让首都统治者死亡后 polity.ruler_id 永久指向死者。该同步应加入继承测试。
+
+
+十三、当前格式反序列化和计数器恢复
+================================
+
+World.from_dict() 必须执行以下步骤。
+
+
+1. 地理和管理器初始化
+-------------------
+
+反序列化后必须创建：
+
+- Geography(seed) 并 generate()；
+- SettlementManager(seed)；
+- EventGenerator(seed)；
+- EvidenceGenerator(seed)；
+- RecordGenerator(seed)；
+- PersonManager(seed)；
+- InformantManager(...)；
+- StorageManager(...)；
+- PolityManager(seed)；
+- EventRuleRegistry()；
+- EffectResolver(seed)。
+
+目前 from_dict() 文档声称 Geography 需外部重建，但动态选址无法在 geography=None 时工作。
+本期统一在 from_dict() 内按 seed 重建 Geography。
+
+
+2. 恢复所有 counter
+-------------------
+
+编写通用私有辅助函数，不要到处复制 rsplit：
+
+    def _max_numeric_suffix(ids: Iterable[str], prefix: str) -> int: ...
+
+分别恢复：
+
+- SettlementManager.counter from stl_####；
+- SettlementManager.used_names from all settlement.name；
+- EventGenerator.counter from event_###### 或现有实际格式；
+- EvidenceGenerator.counter from evd_######；
+- PersonManager.counter 只匹配 person_####；person_informant_* 不属于该 manager；
+- RecordGenerator.counter；
+- EffectResolver.effect_counter from所有 event.effect_ids；
+- PolityManager.polity_counter；
+- PolityManager.control_counter；
+- InformantManager 已有自己的恢复逻辑，保持现状。
+
+恢复逻辑必须匹配每个生成器实际使用的 ID 格式，不能假设所有 ID 位数相同。
+
+
+3. 严格 schema 校验
+------------------
+
+World.from_dict() 只接受 schema_version=12，并要求本版本声明的全部集合、追踪状态和嵌套
+对象版本存在。版本不匹配、字段缺失、政治引用无效或一个聚落存在多个当前控制时期时，
+直接抛出 ValueError。不要自动补人物、记录、证据文本、保管地点、polity、control period
+或 _last_founding_year。
+
+
+十四、查询和显示
+================
+
+1. World.summary() 无需改变格式，动态聚落自然进入计数。
+2. PlayerSession._world_map_payload() 已遍历 world.settlements，动态聚落自然显示。
+3. viewer/data.py 若有独立地点 payload，也应确认没有固定数量或初始化快照假设。
+4. 本期不要向 player-safe payload 暴露 controller_polity_id、origin_settlement_id 或真实
+   founding event；玩家仍需通过证据认识历史。
+5. main.py 的聚落和事件统计应自然包含新聚落。
+
+注意：浏览器玩家会话是在完整历史模拟结束后创建，因此不存在“玩家正在某地时世界突然
+出现聚落”的缓存失效问题。动态建城发生在 World.generate(years) 内，而不是玩家日内时钟。
+
+
+十五、测试计划
+==============
+
+新增 tests/test_natural_settlement_founding.py，测试应尽量调用 planner/effect 的稳定接口，
+不要通过把生产概率调到极高来制造脆弱测试。
+
+
+1. 选址器测试
+-------------
+
+- 返回位置在地图内；
+- suitability 达标；
+- 不在 blocked biome；
+- 不占用现有聚落或废墟；
+- 与所有聚落满足最小距离；
+- 同一 seed/source/year 返回相同排序和选择；
+- 没有合法位置时返回空列表而不是抛出异常。
+
+
+2. planner 测试
+--------------
+
+- 人口不足返回 None；
+- 稳定度不足返回 None；
+- 缺粮返回 None；
+- 财政不足返回 None；
+- 冷却期内返回 None；
+- protected_until_year 内返回 None；
+- world settlement 达到上限返回 None；
+- 条件满足且固定 roll 成功时返回完整 FoundingPlan；
+- settler_count、food_transfer、treasury_transfer 满足上下限。
+
+为控制随机 roll，建议把 planner 拆成：
+
+    eligible(...)
+    probability(...)
+    build_plan(...)
+
+单元测试分别验证，不要 mock random.Random 的内部实现。
+
+
+3. FoundSettlement effect 测试
+-----------------------------
+
+- 成功后新聚落存在；
+- 母聚落人口减少 settler_count；
+- 世界总人口在 effect 前后相同；
+- 粮食和财政转移守恒；
+- founder 永久迁入新聚落并获得角色；
+- 新聚落继承正确 polity；
+- 新 control period 正确；
+- tracking maps 初始化；
+- effect_to_dict 包含完整字段；
+- reverse_effect 后新聚落和 control period 被删除，母聚落和 founder 完全恢复；
+- 非法坐标、重复 ID、资源不足和重复位置 validate 失败且世界零变化。
+
+
+4. 集成测试
+-----------
+
+构造一个满足条件的 World，直接执行 _execute_founding_plan()，验证：
+
+- founding event 的 primary_location 是新聚落；
+- participants 同时包含母聚落和新聚落；
+- 两地 event history 都包含该事件；
+- event.details 包含 origin、settler_count、founding_type 和 polity；
+- founder 在 event.person_ids；
+- 新聚落存在 founding_charter、foundation_stone；
+- 新聚落存在有效知情人；
+- 新聚落有继承人；
+- founder 原为母聚落 heir 时，母聚落获得新的有效 heir；
+- protected_until_year 正确；
+- 下一年压力计算包含新聚落。
+
+
+5. Polity 和控制权测试
+---------------------
+
+- 初始每个聚落拥有一个独立 polity；
+- 殖民地与母聚落 controller_polity_id 相同；
+- war partner 不会选择同 polity 聚落；
+- TransferControl 关闭旧 period 并创建新 period；
+- TransferControl 不修改 ruler_name；
+- TransferControl rollback 恢复控制历史。
+- 首都 ruler 继承会同步 polity.ruler_id，非首都继承不会改变 polity.ruler_id。
+
+
+6. 当前格式序列化测试
+--------------------
+
+- Polity roundtrip；
+- SettlementControlPeriod roundtrip；
+- 新 Settlement 字段 roundtrip；
+- 含动态聚落的 World roundtrip；
+- from_dict 后 geography 非 None 且可继续选址；
+- from_dict 后继续创建 settlement/event/evidence/person/effect 均无重复 ID；
+- 非 schema 12 数据被拒绝；
+- 当前 schema 缺少必填集合或嵌套对象版本不匹配时被拒绝。
+
+
+7. 确定性和长期模拟测试
+----------------------
+
+扩展 tests/test_determinism.py：
+
+- 相同 seed、years 的动态聚落数量一致；
+- 每个动态聚落的 ID、名称、位置、founded_year、origin、人口和 polity 一致；
+- 建城事件及 effect 字典一致。
+
+增加一个 200 年长期模拟测试，但不要断言一定产生固定数量聚落。断言：
+
+- 不超过 MAX_WORLD_SETTLEMENTS；
+- 不重叠、不在非法地形；
+- 所有聚落 ID 唯一；
+- 所有当前 polity/control 引用有效；
+- 所有 control periods 不重叠；
+- 没有负人口、负粮食或负财政；
+- 动态聚落若存在，均有 origin 和 founding event。
+
+
+8. 必须运行的回归命令
+-------------------
+
+    pytest -q tests/test_natural_settlement_founding.py
+    pytest -q tests/test_effects.py tests/test_event_rules.py
+    pytest -q tests/test_serialization.py tests/test_determinism.py
+    pytest -q tests/test_cross_settlement_mobility.py
+    pytest -q
+
+如完整测试耗时较长，也必须最终运行一次，不能只报告新增测试通过。
+
+
+十六、建议开发顺序
+==================
+
+严格按以下顺序实施，每一步测试通过后再进入下一步。
+
+
+阶段 1：政治归属基础
+------------------
+
+修改/新增：
+
+- simulation/polity.py
+- simulation/settlement.py
+- simulation/world.py
+- tests/test_serialization.py
+- 新增 tests/test_polity.py
+
+完成 Polity、SettlementControlPeriod、初始 polity 创建和当前格式序列化。
+此阶段不加入自然建城。
+
+
+阶段 2：修复控制权语义
+--------------------
+
+修改：
+
+- simulation/effects.py
+- simulation/event_rules.py
+- tests/test_effects.py
+- tests/test_event_rules.py
+- tests/test_diplomatic_event_chains.py
+
+让 TransferControl 使用 polity ID，并阻止同 polity 聚落互相发动普通战争。
+
+
+阶段 3：ID 恢复和读档后继续模拟
+------------------------------
+
+修改：
+
+- simulation/world.py
+- 各 manager 的小型恢复辅助方法
+- tests/test_serialization.py
+
+先解决所有动态创建所依赖的 counter 和 geography 恢复问题。
+
+
+阶段 4：动态选址和规划器
+----------------------
+
+新增：
+
+- simulation/founding.py
+- tests/test_natural_settlement_founding.py
+
+只实现纯计算的 candidate 和 plan，不修改世界。
+
+
+阶段 5：FoundSettlement effect
+-----------------------------
+
+修改：
+
+- simulation/effects.py
+- simulation/settlement.py
+- tests/test_effects.py
+- tests/test_natural_settlement_founding.py
+
+完成应用、快照、回滚和 effect 序列化。
+
+
+阶段 6：接入年度模拟和历史材料
+----------------------------
+
+修改：
+
+- simulation/world.py
+- simulation/events.py
+- simulation/evidence.py（仅必要时）
+- simulation/written_content.py
+- simulation/records.py（仅当现有 claim 缺少 origin 信息时）
+- 集成测试
+
+完成 planned_colony 的端到端模拟。
+
+
+阶段 7：长期回归和参数校准
+--------------------------
+
+对至少以下组合运行模拟并输出统计：
+
+- seeds: 1, 42, 77, 123, 999
+- years: 50, 100, 200
+
+记录：
+
+- 总聚落、现存聚落、废墟数量；
+- 动态聚落数量和建城年份；
+- 每个母聚落建立的殖民地数量；
+- 动态聚落在建立后 10 年的存活率；
+- 是否达到世界上限；
+- 是否存在同 polity 战争。
+
+推荐校准目标，不作为硬测试断言：
+
+- 50 年世界总聚落通常约 16-24 个；
+- 100 年世界总聚落通常约 32-48 个；
+- 200 年允许继续增长，但不应多数 seed 过早达到 100 个上限；
+- 不应所有 seed 都完全不建城；
+- 不应多数 seed 在早期快速达到上限；
+- 新聚落 10 年存活率不应低于约 60%。
+
+如果结果偏离，优先调整 config 常量，不要在公式中添加 seed 特判。
+
+
+十七、实现质量要求
+==================
+
+1. 不要在 World._tick_year() 中堆积选址和概率细节；它只负责阶段编排。
+2. planner 尽量保持纯函数，世界修改集中在 effect 和 World 执行入口。
+3. 不要读取或修改 player knowledge 来影响历史真相模拟。
+4. 不要向玩家 payload 泄漏 event_id、polity_id 或其他 truth-only 字段。
+5. 不要用 Python 内置 hash() 构造确定性随机种子；跨进程 hash 会变化。
+6. 遍历会影响结果的 dict 时必须显式排序。
+7. 不要捕获宽泛异常后静默继续；planner 的“不符合条件”用 None，程序错误应暴露。
+8. 每个新增 dataclass 必须有 to_dict()/from_dict() 和 roundtrip 测试。
+9. 每个新增跨对象引用必须在长期测试中验证引用完整性。
+10. 不要顺手重构无关玩家 UI、调查日志或文本载体系统。
+
+
+十八、验收标准
+==============
+
+满足以下全部条件才算功能完成：
+
+1. 自然建城在 World.generate(years) 的年度历史模拟中发生，不依赖玩家输入。
+2. planned_colony 的触发可以由人口、经济、稳定和地理条件解释。
+3. 新聚落具有合法位置、母聚落、建城者、人口和资源来源。
+4. 人口、粮食、财政转移没有凭空产生或丢失。
+5. 新聚落和母聚落属于同一 polity，并有无重叠的控制历史。
+6. 同一 polity 的聚落不会被普通战争规则互相选为敌人。
+7. 建城事件同时进入母聚落和新聚落历史，并产生可调查证据。
+8. 新聚落能被本地地图、世界地图和查询接口正常读取。
+9. 当前 schema 存档往返后能继续创建实体且无重复 ID；非当前 schema 被明确拒绝。
+10. 固定 seed 完全确定；所有新增测试和现有完整测试通过。
+11. 200 年多 seed 校准没有出现聚落爆炸、非法选址或控制权悬空。
+
+
+十九、后续行政区划的衔接方式
+============================
+
+完成本方案后，行政区划阶段可以直接在现有基础上增加：
+
+1. 当一个 polity 控制至少两个聚落时，允许建立第一个 AdministrativeUnit。
+2. capital_settlement_id 指向行政中心，但不改变 Settlement 的 origin。
+3. AdministrativeAssignment 记录聚落加入、转区和脱离的时间范围。
+4. TransferControl 跨 polity 时关闭原行政 assignment，并由新 polity 分配辖区。
+5. 建城时可以根据母聚落当前行政区，决定新聚落暂归同一区或建立边区。
+6. 行政改革、分区、合并和迁都都生成 HistoricalEvent、记录和证据。
+
+因为本期已经把地点、历史来源和政治控制分离，后续行政区划不需要修改自然建城的核心
+语义，只需在建城成功后增加一次行政 assignment。
+
+
+二十、最终提醒
+==============
+
+本功能最重要的不是“聚落数量会增长”，而是新聚落必须成为历史因果链的一部分：
+
+- 它为什么出现；
+- 人从哪里来；
+- 谁带领他们；
+- 为什么选择这块土地；
+- 当时受谁控制；
+- 后人还能找到哪些互相印证或冲突的材料。
+
+如果实现只创建 Settlement 而没有资源来源、政治归属、建城事件和证据，则不符合本文
+验收标准，也不能视为行政区划功能的合格基础。

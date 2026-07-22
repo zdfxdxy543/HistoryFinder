@@ -461,6 +461,8 @@ def build_written_content(event, subtype: str, seed: int,
     if base_subtype == "foundation_stone":
         founder = details.get("founder", "诸位立约者")
         settlement = details.get("settlement_name", "此地")
+        origin = details.get("origin_settlement_name")
+        settlers = details.get("settler_count")
         boundary = _stable_choice(seed, document_key, "foundation_boundary", [
             "东至双柳，西至浅滩，南至黑石，北至旧坡",
             "以井心为中，向四方各量三百步",
@@ -471,9 +473,15 @@ def build_written_content(event, subtype: str, seed: int,
             "石匠、引水人、守夜者与分种者",
             "携火者、掌秤者、渡河者与三名无印见证人",
         ])
+        origin_passage = (
+            f"第{year}年，{founder}率{settlers}名来自{origin}的移民"
+            f"在此下第一石，立名为{settlement}。"
+            if origin and settlers else
+            f"第{year}年，{founder}与同行诸户在此下第一石，立名为{settlement}。"
+        )
         passages = [
             _passage("heading", f"{settlement}奠基铭"),
-            _passage("body", f"第{year}年，{founder}与同行诸户在此下第一石，立名为{settlement}。"),
+            _passage("body", origin_passage),
             _passage("body", f"此地之界：{boundary}；界外旧路与流水不得据为私有。"),
             _passage("body", "先掘井，后筑门；先留通路，后分屋地。任何一户不得封断众人取水之径。"),
             _passage("body", "外田依劳力分耕，荒年共留种谷；仓中公粮须由两人同启封记。"),
@@ -485,14 +493,22 @@ def build_written_content(event, subtype: str, seed: int,
     elif base_subtype == "founding_charter":
         founder = details.get("founder", "诸位立约者")
         settlement = details.get("settlement_name", "此地")
+        origin = details.get("origin_settlement_name")
+        settlers = details.get("settler_count")
         grant = _stable_choice(seed, document_key, "charter_grant", [
             "水井、道路与外田由共同劳作的人使用。",
             "居所、耕地与水源的界线须由见证人共同确认。",
             "城门以内的争议由立约者与居民代表共同裁断。",
         ])
+        opening = (
+            f"第{year}年，{founder}与来自{origin}的{settlers}名移民"
+            f"在{settlement}立下此约。"
+            if origin and settlers else
+            f"第{year}年，{founder}与随行者在{settlement}立下此约。"
+        )
         passages = [
             _passage("heading", f"{settlement}立约书"),
-            _passage("body", f"第{year}年，{founder}与随行者在{settlement}立下此约。"),
+            _passage("body", opening),
             _passage("body", grant),
             _passage("closing", f"立约人：{founder}。见证者名列封印之下。"),
         ]

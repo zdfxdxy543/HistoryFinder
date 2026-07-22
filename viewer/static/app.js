@@ -50,6 +50,12 @@ const STORAGE_LABELS = {
   field_site: "野外遗址", community_tradition: "口述传承",
 };
 
+const POLITY_COLORS = [
+  "#c84f45", "#3f78b5", "#4f8a5b", "#c49336",
+  "#7b61a8", "#2f8f91", "#b05a83", "#70823f",
+  "#d27735", "#5b6f91", "#8a6248", "#4882a0",
+];
+
 const state = {
   data: null,
   indexes: {},
@@ -60,6 +66,8 @@ const state = {
   selectedPersonId: null,
   selectedArchiveId: null,
   terrainCanvas: null,
+  territoryCanvas: null,
+  polityColors: new Map(),
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -108,6 +116,7 @@ function buildIndexes(data) {
     evidence: index(data.evidence),
     persons: index(data.persons),
     storageSites: index(data.storage_sites || []),
+    polities: index(data.territory?.polities || []),
   };
 }
 
@@ -124,6 +133,7 @@ async function loadWorld(seed, years) {
     state.selectedPersonId = payload.persons[0]?.id || null;
     state.selectedArchiveId = payload.records[0]?.id || null;
     buildTerrainCanvas();
+    buildTerritoryCanvas();
     renderSummary();
     populateFilters();
     renderLegend();
@@ -207,7 +217,66 @@ function buildTerrainCanvas() {
   state.terrainCanvas = canvas;
 }
 
+function polityColor(code) {
+  return POLITY_COLORS[Number(code) % POLITY_COLORS.length];
+}
+
+function hexToRgb(hex) {
+  return [
+    parseInt(hex.slice(1, 3), 16),
+    parseInt(hex.slice(3, 5), 16),
+    parseInt(hex.slice(5, 7), 16),
+  ];
+}
+
+function buildTerritoryCanvas() {
+  const territory = state.data.territory;
+  state.polityColors = new Map();
+  state.territoryCanvas = null;
+  if (!territory?.owners?.length) return;
+
+  for (const polity of territory.polities) {
+    state.polityColors.set(polity.id, polityColor(polity.code));
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = state.data.world.width;
+  canvas.height = state.data.world.height;
+  const context = canvas.getContext("2d");
+  const image = context.createImageData(canvas.width, canvas.height);
+  const colors = Object.fromEntries(territory.polities.map((polity) => [
+    polity.code, hexToRgb(polityColor(polity.code)),
+  ]));
+  const unclaimed = territory.unclaimed_code;
+  let offset = 0;
+  for (let y = 0; y < canvas.height; y += 1) {
+    for (let x = 0; x < canvas.width; x += 1) {
+      const code = territory.owners[y][x];
+      if (code !== unclaimed && colors[code]) {
+        const boundary = (
+          x === 0 || y === 0 || x === canvas.width - 1 || y === canvas.height - 1
+          || territory.owners[y][x - 1] !== code
+          || territory.owners[y][x + 1] !== code
+          || territory.owners[y - 1][x] !== code
+          || territory.owners[y + 1][x] !== code
+        );
+        image.data.set([...colors[code], boundary ? 190 : 82], offset);
+      }
+      offset += 4;
+    }
+  }
+  context.putImageData(image, 0, 0);
+  state.territoryCanvas = canvas;
+}
+
 function renderLegend() {
+  if ($("#toggle-territories").checked && state.data.territory) {
+    $("#map-legend").classList.add("territory-legend");
+    $("#map-legend").innerHTML = state.data.territory.polities.map((polity) => `
+      <span class="legend-item"><span class="swatch" style="background:${polityColor(polity.code)}"></span>${escapeHtml(polity.name)}</span>
+    `).join("") + '<span class="legend-item"><span class="swatch swatch-unclaimed"></span>无主地</span>';
+    return;
+  }
+  $("#map-legend").classList.remove("territory-legend");
   $("#map-legend").innerHTML = Object.entries(BIOME_STYLE).map(([name, style]) => `
     <span class="legend-item"><span class="swatch" style="background:${style.color}"></span>${style.label}</span>
   `).join("");
@@ -233,6 +302,9 @@ function renderMap() {
   context.clearRect(0, 0, width, height);
   context.imageSmoothingEnabled = false;
   context.drawImage(state.terrainCanvas, 0, 0, width, height);
+  if ($("#toggle-territories").checked && state.territoryCanvas) {
+    context.drawImage(state.territoryCanvas, 0, 0, width, height);
+  }
   const sx = width / state.data.world.width;
   const sy = height / state.data.world.height;
 
@@ -339,6 +411,7 @@ function entityLinks(type, ids, labeler) {
 
 function renderSettlementDetail(settlement, target) {
   const ruler = state.indexes.persons.get(settlement.ruler_id);
+  const polity = state.indexes.polities.get(settlement.controller_polity_id);
   const recent = settlement.event_ids.slice(-8).reverse();
   const relations = Object.values(settlement.relationships).sort((a, b) => b.trust - a.trust);
   const storageSites = (settlement.storage_site_ids || [])
@@ -351,6 +424,7 @@ function renderSettlementDetail(settlement, target) {
       ["人口", formatNumber(settlement.population)],
       ["粮食库存", formatNumber(settlement.food_stock, 1)],
       ["财政", formatNumber(settlement.treasury, 1)],
+      ["所属国家", escapeHtml(polity?.name || "无")],
       ["统治者", ruler ? entityLink("person", ruler.id, ruler.name) : escapeHtml(settlement.ruler_name || "无")],
       ["建立年份", formatNumber(settlement.founded_year)],
       ["毁灭年份", settlement.destroyed_year == null ? "-" : formatNumber(settlement.destroyed_year)],
@@ -655,6 +729,10 @@ function bindEvents() {
   });
   $$(".tab-button").forEach((button) => button.addEventListener("click", () => switchView(button.dataset.view)));
   ["#toggle-labels", "#toggle-relations", "#toggle-ruins"].forEach((selector) => $(selector).addEventListener("change", renderMap));
+  $("#toggle-territories").addEventListener("change", () => {
+    renderLegend();
+    renderMap();
+  });
   ["#event-search", "#event-type-filter", "#event-settlement-filter", "#event-causal-filter"].forEach((selector) => {
     $(selector).addEventListener(selector.includes("search") ? "input" : "change", renderTimeline);
   });
@@ -713,7 +791,9 @@ function updateMapCoordinate(event) {
   const point = pointerWorldPosition(event);
   const code = state.data.geography.terrain[point.y][point.x];
   const biome = Object.entries(state.data.geography.biome_codes).find(([, value]) => value === code)?.[0];
-  $("#map-coordinate").textContent = `坐标 ${point.x}, ${point.y} · ${BIOME_STYLE[biome]?.label || biome}`;
+  const territoryCode = state.data.territory?.owners?.[point.y]?.[point.x];
+  const polity = state.data.territory?.polities.find((item) => item.code === territoryCode);
+  $("#map-coordinate").textContent = `坐标 ${point.x}, ${point.y} · ${BIOME_STYLE[biome]?.label || biome}${polity ? ` · ${polity.name}` : " · 无主地"}`;
 }
 
 function selectSettlementAtPointer(event) {

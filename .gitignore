@@ -16,6 +16,7 @@ env/
 models/
 *.gguf
 *.log
+data/worlds/
 
 # Frontend dependencies (the built player prototype is kept in player/dist)
 player/node_modules/

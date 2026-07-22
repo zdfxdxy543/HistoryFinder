@@ -96,6 +96,9 @@ class EventGenerator:
         self.counter = 0
 
     def _next_id(self) -> str:
+        return self.reserve_id()
+
+    def reserve_id(self) -> str:
         self.counter += 1
         return f"event_{self.counter:04d}"
 
@@ -103,19 +106,44 @@ class EventGenerator:
 
     def generate_founding_event(self, settlement_id: str, settlement_name: str,
                                  year: int, founder_name: str,
-                                 founder_id: str | None = None) -> HistoricalEvent:
+                                 founder_id: str | None = None,
+                                 origin_settlement_id: str | None = None,
+                                 origin_settlement_name: str | None = None,
+                                 settler_count: int | None = None,
+                                 controller_polity_id: str | None = None,
+                                 founding_type: str = "initial",
+                                 reserved_event_id: str | None = None,
+                                 ) -> HistoricalEvent:
+        participants = [settlement_id]
+        if origin_settlement_id and origin_settlement_id not in participants:
+            participants.append(origin_settlement_id)
+        if founding_type == "planned_colony":
+            description = (
+                f"{year}年，{founder_name}带领{settler_count}名来自"
+                f"{origin_settlement_name}的移民，在此建立了"
+                f"{settlement_name}。")
+        else:
+            description = (
+                f"{year}年，{founder_name}带领追随者在"
+                f"{settlement_name}定居，建立了这座聚落。")
         return HistoricalEvent(
-            id=self._next_id(), year=year, event_type="founding",
+            id=reserved_event_id or self.reserve_id(),
+            year=year, event_type="founding",
             title=f"建立{settlement_name}",
-            severity=0.3,
+            severity=0.45 if founding_type == "planned_colony" else 0.3,
             primary_location=settlement_id,
-            participants=[settlement_id],
+            participants=participants,
             person_ids=[founder_id] if founder_id else [],
             details={
                 "settlement_name": settlement_name,
                 "founder": founder_name,
                 "founder_id": founder_id,
-                "description_cn": f"{year}年，{founder_name}带领追随者在{settlement_name}定居，建立了这座聚落。",
+                "founding_type": founding_type,
+                "origin_settlement_id": origin_settlement_id,
+                "origin_settlement_name": origin_settlement_name,
+                "settler_count": settler_count,
+                "controller_polity_id": controller_polity_id,
+                "description_cn": description,
             },
         )
 

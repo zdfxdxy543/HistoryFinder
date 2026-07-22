@@ -247,7 +247,7 @@ def test_world_records_roundtrip(recorded_world):
                 == evidence.source_record_id)
 
 
-def test_old_world_without_records_rebuilds_record_links():
+def test_world_rejects_missing_record_state():
     world = World(seed=305)
     world.generate(years=0)
     data = world.to_dict()
@@ -256,17 +256,8 @@ def test_old_world_without_records_rebuilds_record_links():
         evidence.pop("source_record_id", None)
         evidence.pop("retained_claim_ids", None)
 
-    restored = World.from_dict(data)
-    carriers = [
-        evidence for evidence in restored.evidence.values()
-        if evidence.evidence_type in {"document", "oral"}
-    ]
-
-    assert restored.records
-    assert carriers
-    assert all(evidence.source_record_id in restored.records
-               for evidence in carriers)
-    assert all(evidence.retained_claim_ids for evidence in carriers)
+    with pytest.raises(ValueError, match="missing: records"):
+        World.from_dict(data)
 
 
 def test_player_knowledge_roundtrip(recorded_world):

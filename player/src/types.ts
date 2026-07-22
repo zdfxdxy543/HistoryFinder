@@ -64,6 +64,12 @@ export type WorldLocation = {
   site_type: "settlement" | "ruin";
   size: string;
   biome: string;
+  polity_code: number | null;
+};
+
+export type WorldPolity = {
+  code: number;
+  name: string;
 };
 
 export type WorldMapState = {
@@ -71,6 +77,11 @@ export type WorldMapState = {
   height: number;
   terrain: number[][];
   biome_codes: Record<string, number>;
+  territory: {
+    unclaimed_code: number;
+    owners: number[][];
+    polities: WorldPolity[];
+  };
   locations: WorldLocation[];
   current_location_id: string;
 };

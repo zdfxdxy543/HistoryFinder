@@ -214,11 +214,16 @@ class InformantManager:
                 maximum = max(maximum, int(tail))
         return maximum
 
-    def ensure_settlement_roles(self, world, settlement, year: int) -> None:
+    def ensure_settlement_roles(
+            self, world, settlement, year: int,
+            active_roles: set[str] | None = None) -> None:
         if not settlement.alive:
             return
         for role in INFORMANT_ROLES:
-            if self._active_for_role(world, settlement.id, role):
+            if ((active_roles is not None and role in active_roles)
+                    or (active_roles is None
+                        and self._active_for_role(
+                            world, settlement.id, role))):
                 continue
             previous = self._latest_for_role(settlement.id, role)
             person = self._find_unregistered_person(
@@ -227,13 +232,28 @@ class InformantManager:
                 person = self._create_person(world, settlement.id, role, year)
             informant = self._create_informant(
                 settlement.id, role, person.id, year)
+            if active_roles is not None:
+                active_roles.add(role)
             if previous is not None:
                 self._transfer_knowledge(previous, informant, year)
 
     def ensure_all_roles(self, world, year: int) -> None:
+        active_by_settlement = {
+            settlement_id: set() for settlement_id in world.settlements
+        }
+        for informant in self.informants.values():
+            settlement = world.settlements.get(informant.settlement_id)
+            person = world.persons.get(informant.person_id)
+            if (settlement is not None and settlement.alive
+                    and person is not None and person.alive
+                    and person.current_location_id == settlement.id):
+                active_by_settlement[settlement.id].add(informant.role)
+
         for settlement in sorted(
                 world.settlements.values(), key=lambda item: item.id):
-            self.ensure_settlement_roles(world, settlement, year)
+            self.ensure_settlement_roles(
+                world, settlement, year,
+                active_by_settlement[settlement.id])
 
     def active_informants(self, world, settlement_id: str,
                           roles: set[str] | None = None) -> list[Informant]:
