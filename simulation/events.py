@@ -467,18 +467,18 @@ class EventGenerator:
     def generate_crime_event(self, year: int, settlement_id: str,
                               settlement_name: str) -> HistoricalEvent:
         crimes = [
-            ("大盗窃案", f"{year}年，{settlement_name}发生了一起震惊全城的大盗窃案——领主宝库中一批珍贵的宝石不翼而飞。"),
-            ("暗杀未遂", f"{year}年，有人在{settlement_name}的集市上试图暗杀当地的税务官。刺客虽然被擒，但幕后主使始终未能查明。"),
-            ("走私团伙覆灭", f"{year}年，{settlement_name}的守卫捣毁了一个长期走私违禁药材的团伙。"),
+            ("theft", "大盗窃案", f"{year}年，{settlement_name}发生了一起大盗窃案，失物与去向随后被分别登记。"),
+            ("attempted_assassination", "暗杀未遂", f"{year}年，有人在{settlement_name}的集市上试图暗杀当地的税务官。刺客虽然被擒，但幕后主使始终未能查明。"),
+            ("smuggling_raid", "走私团伙覆灭", f"{year}年，{settlement_name}的守卫捣毁了一个长期走私违禁药材的团伙。"),
         ]
-        name, desc = self.rng.choice(crimes)
+        crime_type, name, desc = self.rng.choice(crimes)
         return HistoricalEvent(
             id=self._next_id(), year=year, event_type="crime",
             title=f"{settlement_name}{name}",
             severity=0.08,
             primary_location=settlement_id,
             participants=[settlement_id],
-            details={"description_cn": desc},
+            details={"crime_type": crime_type, "description_cn": desc},
         )
 
     def generate_marriage_event(self, year: int, settlement_id: str,

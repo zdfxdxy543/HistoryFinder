@@ -49,6 +49,62 @@ def _passage(kind: str, text: str) -> dict:
     return {"kind": kind, "text": text}
 
 
+def _knowledge_transfer_passages(details: dict,
+                                 dimensions: set[str]) -> list[dict]:
+    passages = []
+    for transfer in details.get("knowledge_transfers", []):
+        dimension = transfer.get("dimension", "")
+        if dimension not in dimensions:
+            continue
+        person = transfer.get("person_name", "一名来访者")
+        source = transfer.get("source_location_name", "外地")
+        target = transfer.get("target_location_name", "此地")
+        topic = transfer.get("topic_name", "未具名内容")
+        if dimension == "technology":
+            text = (
+                f"传播附记：{person}从{source}携来{topic}，在{target}"
+                "拆检构件并演示操作；当地工匠另记尺寸与材料，准备复制。")
+        elif dimension == "theory":
+            text = (
+                f"讲授附记：{person}由{source}抵达{target}，讲解了"
+                f"{topic}的定义、例证和验证步骤；听讲者的异议另列在后。")
+        else:
+            text = (
+                f"传抄附记：{person}从{source}带来《{topic}》，在{target}"
+                "公开诵读，并交由抄写者核对篇章次序。")
+        passages.append(_passage("copy_note", text))
+    return passages
+
+
+def _network_update_passages(details: dict,
+                             channels: set[str]) -> list[dict]:
+    passages = []
+    for update in details.get("network_updates", []):
+        channel = update.get("channel", "")
+        before = update.get("status_before")
+        after = update.get("status_after")
+        if channel not in channels or before == after:
+            continue
+        source = update.get("source_location_name", "一处聚落")
+        target = update.get("target_location_name", "另一处聚落")
+        person = update.get("person_name", "经手人")
+        channel_name = {
+            "trade": "商旅路线",
+            "scholarly": "学术联系",
+            "cultural": "传抄联系",
+        }.get(channel, "往来")
+        status_text = {
+            "regular": "开始按期维持",
+            "established": "现已由固定人员和保管处维持",
+        }.get(after, "开始有人往来")
+        passages.append(_passage(
+            "copy_note",
+            f"往来附记：{person}此次由{source}抵达{target}后，两地的"
+            f"{channel_name}{status_text}。",
+        ))
+    return passages
+
+
 def _year_label(year: int | str | None) -> str:
     if isinstance(year, int) and year < 0:
         return f"纪元前{-year}年"
@@ -449,11 +505,31 @@ def build_written_content(event, subtype: str, seed: int,
             "defender_victory": f"守城官呈报：{defender}的守军迫使{attacker}撤离城墙与外营。",
             "stalemate": f"军务书记记录：{attacker}与{defender}均已收兵，阵地归属仍无定论。",
         }
+        spoils = [
+            item for item in details.get("object_transfers", [])
+            if item.get("transfer_type") == "war_spoils"
+        ]
         passages = [
             _passage("heading", f"第{year}年军务抄录"),
             _passage("body", reports.get(outcome, reports["stalemate"])),
-            _passage("closing", "伤亡、俘虏与物资损耗另见附页。"),
         ]
+        if spoils:
+            names = "、".join(item.get("evidence_name", "未编号物品")
+                              for item in spoils)
+            destination = spoils[0].get("to_location_name", "接收地")
+            passages.append(_passage(
+                "body", f"接收清册列有{names}，已送往{destination}登记保管。"))
+        captives = [
+            item for item in details.get("person_movements", [])
+            if item.get("travel_role") == "captive"
+        ]
+        if captives:
+            names = "、".join(item.get("person_name", "未具名者")
+                              for item in captives)
+            destination = captives[0].get("to_location_name", "收押地")
+            passages.append(_passage(
+                "body", f"随附名册记有{names}，已押往{destination}候审。"))
+        passages.append(_passage("closing", "伤亡、俘虏与物资损耗另见附页。"))
     elif base_subtype in ("literary_manuscript", "traveling_literary_copy"):
         passages = _literary_passages(
             seed,
@@ -480,6 +556,10 @@ def build_written_content(event, subtype: str, seed: int,
                 "copy_note",
                 f"抄写记：此本在{details.get('target_name', '外地')}重新装订，"
                 "个别词句依当地读法改写。"))
+        passages.extend(_knowledge_transfer_passages(
+            details, {"culture"}))
+        passages.extend(_network_update_passages(
+            details, {"cultural"}))
     elif base_subtype == "literary_commentary":
         title = details.get("work_title", "无题文稿")
         literary_sources = [
@@ -537,6 +617,10 @@ def build_written_content(event, subtype: str, seed: int,
             details.get("author_name", "佚名学者"),
             details.get("theory_field", "unknown"),
         )
+        passages.extend(_knowledge_transfer_passages(
+            details, {"theory"}))
+        passages.extend(_network_update_passages(
+            details, {"scholarly"}))
     elif base_subtype == "lecture_notes":
         field_name = details.get("theory_field_name", "自然哲学")
         title = details.get("work_title", "自然原理论")
@@ -550,6 +634,10 @@ def build_written_content(event, subtype: str, seed: int,
             _passage("body", f"课后问题：关于《{title}》的哪些结论只在{_stable_choice(seed, document_key, 'lecture_limit', ['特定季节', '某种尺度', '干燥材料', '固定地点'])}成立？"),
             _passage("closing", "笔记末尾列有借阅者姓名与归还日期。"),
         ]
+        passages.extend(_knowledge_transfer_passages(
+            details, {"theory"}))
+        passages.extend(_network_update_passages(
+            details, {"scholarly"}))
     elif base_subtype == "research_notes":
         discovery = details.get("discovery_name", event.title)
         process = details.get("research_process")
@@ -606,6 +694,10 @@ def build_written_content(event, subtype: str, seed: int,
                 ),
                 _passage("closing", "前序页数与装订次序均已不可考。"),
             ]
+        passages.extend(_knowledge_transfer_passages(
+            details, {"technology"}))
+        passages.extend(_network_update_passages(
+            details, {"scholarly"}))
     elif base_subtype == "reconstruction_account":
         building = details.get("building_name", "受损设施")
         passages = [
@@ -653,7 +745,22 @@ def build_written_content(event, subtype: str, seed: int,
         ])
         passages = [
             _passage("heading", event.title),
-            _passage("body", f"第{year}年，双方使者在此石前交换誓词。{opening}"),
+        ]
+        envoys = [
+            item for item in details.get("person_movements", [])
+            if item.get("travel_role") == "envoy"
+        ]
+        if envoys:
+            envoy = envoys[0]
+            passages.append(_passage(
+                "body",
+                f"第{year}年，{envoy.get('person_name', '来使')}由"
+                f"{envoy.get('from_location_name', '另一方')}抵达此地，"
+                f"双方使者在此石前交换誓词。{opening}"))
+        else:
+            passages.append(_passage(
+                "body", f"第{year}年，双方使者在此石前交换誓词。{opening}"))
+        passages.extend([
             _passage("body", f"第一条：{exchange}。"),
             _passage("body", "第二条：商旅持双方所认封记者可循旧路通行；守门人可验货，不得私取。"),
             _passage("body", "第三条：界石倒伏时，由两方各遣三人同立；一方独立之石不作凭据。"),
@@ -661,7 +768,18 @@ def build_written_content(event, subtype: str, seed: int,
             _passage("body", "第五条：听闻违约者先遣使询问，三日未答方可召集见证者，不得先害来使。"),
             _passage("body", "左右所列为各方见证名号，中央两处凹槽原置印记；缺名不得由后来者补刻。"),
             _passage("closing", "每逢约期，双方在此逐条核对。此石记立约人的誓词，不替未到场者作证。"),
+        ])
+        recovered = [
+            item for item in details.get("object_transfers", [])
+            if item.get("transfer_type") == "recovery"
         ]
+        if recovered:
+            item = recovered[0]
+            passages.insert(-1, _passage(
+                "body",
+                f"附记：{item.get('evidence_name', '一件争议物品')}已送交"
+                f"{item.get('to_location_name', '索取方')}复验；交接只确认收讫，"
+                "不抹去此前账册中的异议。"))
     elif base_subtype == "ruler_tomb":
         old_ruler = details.get("old_ruler", "墓主人")
         successor = details.get("new_ruler", "继任者")
@@ -771,8 +889,42 @@ def build_written_content(event, subtype: str, seed: int,
                 "赊欠项目注明担保人与归还日期，不并入当日实收。",
                 "途中损耗由车队和仓吏各记一次，月底对照差额。",
             ])),
-            _passage("closing", "经手人和见证人的印记留在页脚。"),
         ]
+        traded = [
+            item for item in details.get("object_transfers", [])
+            if item.get("transfer_type") in {"trade", "resale", "smuggling"}
+        ]
+        if traded:
+            names = "、".join(item.get("evidence_name", "未编号物品")
+                              for item in traded)
+            destination = traded[0].get("to_location_name", "对方仓库")
+            transfer_type = traded[0].get("transfer_type", "trade")
+            transfer_text = {
+                "trade": f"另将{names}交付{destination}，接收印记记在右栏。",
+                "resale": (
+                    f"另将转手所得的{names}交付{destination}；旧持有人标记"
+                    "与本次卖方印记不一致，异议暂列附栏。"),
+                "smuggling": (
+                    f"另有{names}随货送往{destination}，货包未附通常的出库"
+                    "封记，经手人姓名留空。"),
+            }[transfer_type]
+            passages.append(_passage("body", transfer_text))
+        merchants = [
+            item for item in details.get("person_movements", [])
+            if item.get("travel_role") == "merchant"
+        ]
+        if merchants:
+            merchant = merchants[0]
+            passages.append(_passage(
+                "body",
+                f"经手商旅{merchant.get('person_name', '姓名缺失')}自"
+                f"{merchant.get('from_location_name', '外地')}抵达，"
+                "货物、封记与同行清单已分别核验。"))
+        passages.append(_passage("closing", "经手人和见证人的印记留在页脚。"))
+        passages.extend(_knowledge_transfer_passages(
+            details, {"technology", "theory", "culture"}))
+        passages.extend(_network_update_passages(
+            details, {"trade"}))
     elif base_subtype == "succession_decree":
         old_ruler = details.get("old_ruler", "前任领主")
         new_ruler = details.get("new_ruler", "继任者")
@@ -844,6 +996,17 @@ def build_written_content(event, subtype: str, seed: int,
             ])),
             _passage("closing", "末页判词不在本卷之中。"),
         ]
+        stolen = [
+            item for item in details.get("object_transfers", [])
+            if item.get("transfer_type") == "theft"
+        ]
+        if stolen:
+            item = stolen[0]
+            passages.insert(-1, _passage(
+                "body",
+                f"失物栏登记{item.get('evidence_name', '一件物品')}；证词称其"
+                f"可能被带往{item.get('to_location_name', '外地')}，但本卷没有"
+                "收讫凭据，也未记明现持有人。"))
     elif base_subtype == "marriage_contract":
         passages = [
             _passage("heading", "婚约与财产见证书"),

@@ -4,8 +4,9 @@
 所有 Effect 都是平铺 dataclass，不用继承。
 """
 
+import copy
 import random
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
@@ -284,6 +285,75 @@ class ModifyRelationship:
 
 
 @dataclass
+class StrengthenExchangeNetwork:
+    """Accumulate a reversible bilateral trade, scholarly, or cultural tie."""
+    effect_type: ClassVar[str] = "strengthen_exchange_network"
+    settlement_a: str
+    settlement_b: str
+    channel: str
+    amount: float = 0.0
+    event_id: str = ""
+    topic_key: str = ""
+
+    def validate(self, world: "World") -> bool:
+        a = world.settlements.get(self.settlement_a)
+        b = world.settlements.get(self.settlement_b)
+        return (
+            a is not None and a.alive
+            and b is not None and b.alive
+            and a.id != b.id
+            and self.channel in {"trade", "scholarly", "cultural"}
+            and self.amount > 0
+        )
+
+    def apply(self, world: "World") -> EffectResult:
+        from simulation.settlement import RelationshipData
+        a = world.settlements[self.settlement_a]
+        b = world.settlements[self.settlement_b]
+        a_had_relationship = b.id in a.relationships
+        b_had_relationship = a.id in b.relationships
+        if not a_had_relationship:
+            a.relationships[b.id] = RelationshipData(partner_id=b.id)
+        if not b_had_relationship:
+            b.relationships[a.id] = RelationshipData(partner_id=a.id)
+        rel_a = a.relationships[b.id]
+        rel_b = b.relationships[a.id]
+        snapshot = {
+            "a_had_relationship": a_had_relationship,
+            "b_had_relationship": b_had_relationship,
+            "a_counts": copy.deepcopy(rel_a.exchange_counts),
+            "a_strengths": copy.deepcopy(rel_a.exchange_strengths),
+            "a_last_years": copy.deepcopy(rel_a.exchange_last_years),
+            "a_topics": copy.deepcopy(rel_a.exchange_topics),
+            "b_counts": copy.deepcopy(rel_b.exchange_counts),
+            "b_strengths": copy.deepcopy(rel_b.exchange_strengths),
+            "b_last_years": copy.deepcopy(rel_b.exchange_last_years),
+            "b_topics": copy.deepcopy(rel_b.exchange_topics),
+        }
+        for relationship in (rel_a, rel_b):
+            relationship.exchange_counts[self.channel] = (
+                relationship.exchange_counts.get(self.channel, 0) + 1)
+            relationship.exchange_strengths[self.channel] = round(min(
+                10.0,
+                relationship.exchange_strengths.get(self.channel, 0.0)
+                + self.amount,
+            ), 3)
+            relationship.exchange_last_years[self.channel] = world.current_year
+            if self.topic_key:
+                topics = relationship.exchange_topics.setdefault(
+                    self.channel, [])
+                if self.topic_key not in topics:
+                    topics.append(self.topic_key)
+                    del topics[:-12]
+        return EffectResult(
+            success=True,
+            snapshot_before=snapshot,
+            message=(f"{self.settlement_a}<->{self.settlement_b}: "
+                     f"{self.channel} network +{self.amount:.2f}"),
+        )
+
+
+@dataclass
 class TransferControl:
     """转让聚落控制权（Phase 3 将用 faction_id）。"""
     effect_type: ClassVar[str] = "transfer_control"
@@ -400,6 +470,297 @@ class ModifyInfrastructure:
             },
             message=(f"{self.settlement_id}: {self.building_type} "
                      f"{before:.1f} → {stl.infrastructure[self.building_type]:.1f}"),
+        )
+
+
+@dataclass
+class TransferEvidence:
+    """Move one portable carrier between settlements with a reversible trail."""
+    effect_type: ClassVar[str] = "transfer_evidence"
+    evidence_id: str
+    target_settlement_id: str
+    target_site_type: str = "private_collection"
+    transfer_type: str = "trade"
+    event_id: str = ""
+    legitimacy: str = "legal"
+    new_owner_type: str | None = "settlement"
+    new_owner_id: str | None = None
+    resolved_claimant_id: str | None = None
+    reason: str = ""
+
+    def validate(self, world: "World") -> bool:
+        evidence = world.evidence.get(self.evidence_id)
+        target = world.settlements.get(self.target_settlement_id)
+        if evidence is None or target is None or not target.alive:
+            return False
+        if evidence.location_id == target.id:
+            return False
+        if evidence.state in {"buried", "destroyed"}:
+            return False
+        if evidence.evidence_type not in {"artifact", "document"}:
+            return False
+        from simulation.storage import SITE_PROFILES
+        return self.target_site_type in SITE_PROFILES
+
+    def apply(self, world: "World") -> EffectResult:
+        evidence = world.evidence[self.evidence_id]
+        target = world.settlements[self.target_settlement_id]
+        site_id = world._storage_mgr._site_id(
+            target.id, self.target_site_type)
+        site_existed = site_id in world.storage_sites
+        snapshot = {
+            "location_id": evidence.location_id,
+            "container_id": evidence.container_id,
+            "holder_type": evidence.holder_type,
+            "holder_id": evidence.holder_id,
+            "storage_position": evidence.storage_position,
+            "accessibility": evidence.accessibility,
+            "location_history": copy.deepcopy(evidence.location_history),
+            "owner_type": evidence.owner_type,
+            "owner_id": evidence.owner_id,
+            "claimant_ids": list(evidence.claimant_ids),
+            "physical_features": copy.deepcopy(evidence.physical_features),
+            "target_site_id": site_id,
+            "target_site_existed": site_existed,
+        }
+        site = world._storage_mgr.get_or_create_site(
+            target, self.target_site_type, world.current_year)
+        old_owner = evidence.owner_id
+        if self.new_owner_type is not None:
+            next_owner = self.new_owner_id or target.id
+            if (old_owner and old_owner != next_owner
+                    and self.legitimacy in {"contested", "illegal"}
+                    and old_owner not in evidence.claimant_ids):
+                evidence.claimant_ids.append(old_owner)
+            evidence.owner_type = self.new_owner_type
+            evidence.owner_id = next_owner
+        if (self.resolved_claimant_id
+                and self.resolved_claimant_id in evidence.claimant_ids):
+            evidence.claimant_ids.remove(self.resolved_claimant_id)
+        world._storage_mgr.move_evidence(
+            evidence,
+            site,
+            world.current_year,
+            self.reason or self.transfer_type,
+            event_id=self.event_id or None,
+            transfer_type=self.transfer_type,
+            legitimacy=self.legitimacy,
+        )
+        clue = {
+            "trade": "foreign_storage_label",
+            "war_spoils": "removed_owner_mark",
+            "evacuation": "emergency_wrapping",
+            "theft": "removed_owner_mark",
+            "smuggling": "concealed_transport_wrap",
+            "resale": "mismatched_inventory_mark",
+            "recovery": "return_inspection_seal",
+        }.get(self.transfer_type)
+        if clue:
+            tag = f"provenance:{clue}"
+            tags = evidence.physical_features.setdefault("tags", [])
+            if tag not in tags:
+                tags.append(tag)
+        return EffectResult(
+            success=True,
+            snapshot_before=snapshot,
+            message=(f"{evidence.id}: {snapshot['location_id']} -> "
+                     f"{target.id} ({self.transfer_type})"),
+        )
+
+
+@dataclass
+class MovePerson:
+    """Move a historical person while preserving home affiliation."""
+    effect_type: ClassVar[str] = "move_person"
+    person_id: str
+    target_settlement_id: str
+    movement_type: str
+    event_id: str = ""
+    movement_year: int | None = None
+    mobility_status: str = "visitor"
+    travel_role: str = ""
+    stay_until_year: int | None = None
+    carried_evidence_ids: list[str] = field(default_factory=list)
+
+    def validate(self, world: "World") -> bool:
+        person = world.persons.get(self.person_id)
+        target = world.settlements.get(self.target_settlement_id)
+        if person is None or not person.alive:
+            return False
+        if target is None or not target.alive:
+            return False
+        return person.current_location_id != target.id
+
+    def apply(self, world: "World") -> EffectResult:
+        person = world.persons[self.person_id]
+        source_id = person.current_location_id or person.settlement_id
+        snapshot = {
+            "current_location_id": source_id,
+            "mobility_status": person.mobility_status,
+            "travel_role": person.travel_role,
+            "stay_until_year": person.stay_until_year,
+            "carried_evidence_ids": list(person.carried_evidence_ids),
+            "movement_history": copy.deepcopy(person.movement_history),
+        }
+        person.current_location_id = self.target_settlement_id
+        person.mobility_status = self.mobility_status
+        person.travel_role = self.travel_role
+        person.stay_until_year = self.stay_until_year
+        person.carried_evidence_ids = list(self.carried_evidence_ids)
+        person.movement_history.append({
+            "year": (world.current_year
+                     if self.movement_year is None else self.movement_year),
+            "event_id": self.event_id or None,
+            "movement_type": self.movement_type,
+            "from_location_id": source_id,
+            "to_location_id": self.target_settlement_id,
+            "mobility_status": self.mobility_status,
+            "travel_role": self.travel_role,
+            "stay_until_year": self.stay_until_year,
+            "carried_evidence_ids": list(self.carried_evidence_ids),
+        })
+        return EffectResult(
+            success=True,
+            snapshot_before=snapshot,
+            message=(f"{person.id}: {source_id} -> "
+                     f"{self.target_settlement_id} ({self.movement_type})"),
+        )
+
+
+@dataclass
+class RelocatePopulation:
+    """Move aggregate survivors from a ruin to a living settlement."""
+    effect_type: ClassVar[str] = "relocate_population"
+    source_settlement_id: str
+    target_settlement_id: str
+    count: int
+    reason: str = "post_disaster_displacement"
+
+    def validate(self, world: "World") -> bool:
+        source = world.settlements.get(self.source_settlement_id)
+        target = world.settlements.get(self.target_settlement_id)
+        return bool(
+            source is not None and not source.alive
+            and target is not None and target.alive
+            and self.count > 0 and source.population >= self.count)
+
+    def apply(self, world: "World") -> EffectResult:
+        source = world.settlements[self.source_settlement_id]
+        target = world.settlements[self.target_settlement_id]
+        snapshot = {
+            "source_population": source.population,
+            "source_peak_population": source.peak_population,
+            "target_population": target.population,
+            "target_peak_population": target.peak_population,
+        }
+        source.population = max(0, source.population - self.count)
+        target.population += self.count
+        target.peak_population = max(
+            target.peak_population, target.population)
+        return EffectResult(
+            success=True,
+            snapshot_before=snapshot,
+            message=(f"{self.count} people: {source.id} -> {target.id}"),
+        )
+
+
+@dataclass
+class KillPerson:
+    """Record a named person's event-linked death with rollback support."""
+    effect_type: ClassVar[str] = "kill_person"
+    person_id: str
+    cause: str
+    event_id: str = ""
+    death_year: int | None = None
+
+    def validate(self, world: "World") -> bool:
+        person = world.persons.get(self.person_id)
+        return person is not None and person.alive
+
+    def apply(self, world: "World") -> EffectResult:
+        person = world.persons[self.person_id]
+        location_id = person.current_location_id or person.settlement_id
+        snapshot = {
+            "alive": person.alive,
+            "death_year": person.death_year,
+            "mobility_status": person.mobility_status,
+            "travel_role": person.travel_role,
+            "stay_until_year": person.stay_until_year,
+            "carried_evidence_ids": list(person.carried_evidence_ids),
+            "movement_history": copy.deepcopy(person.movement_history),
+        }
+        year = world.current_year if self.death_year is None else self.death_year
+        person.alive = False
+        person.death_year = year
+        person.mobility_status = "dead"
+        person.travel_role = "disaster_casualty"
+        person.stay_until_year = None
+        person.carried_evidence_ids = []
+        person.movement_history.append({
+            "year": year,
+            "event_id": self.event_id or None,
+            "movement_type": "disaster_death",
+            "from_location_id": location_id,
+            "to_location_id": location_id,
+            "mobility_status": "dead",
+            "travel_role": "disaster_casualty",
+            "stay_until_year": None,
+            "carried_evidence_ids": [],
+            "cause": self.cause,
+        })
+        return EffectResult(
+            success=True,
+            snapshot_before=snapshot,
+            message=f"{person.id}: died at {location_id} ({self.cause})",
+        )
+
+
+@dataclass
+class MarkRuinSurvivor:
+    """Keep a named survivor at a destroyed settlement as a visible NPC."""
+    effect_type: ClassVar[str] = "mark_ruin_survivor"
+    person_id: str
+    settlement_id: str
+    event_id: str = ""
+    year: int | None = None
+
+    def validate(self, world: "World") -> bool:
+        person = world.persons.get(self.person_id)
+        settlement = world.settlements.get(self.settlement_id)
+        return bool(
+            person is not None and person.alive
+            and settlement is not None and not settlement.alive
+            and person.current_location_id == settlement.id)
+
+    def apply(self, world: "World") -> EffectResult:
+        person = world.persons[self.person_id]
+        snapshot = {
+            "mobility_status": person.mobility_status,
+            "travel_role": person.travel_role,
+            "stay_until_year": person.stay_until_year,
+            "carried_evidence_ids": list(person.carried_evidence_ids),
+            "movement_history": copy.deepcopy(person.movement_history),
+        }
+        event_year = world.current_year if self.year is None else self.year
+        person.mobility_status = "ruin_survivor"
+        person.travel_role = "survivor"
+        person.stay_until_year = None
+        person.carried_evidence_ids = []
+        person.movement_history.append({
+            "year": event_year,
+            "event_id": self.event_id or None,
+            "movement_type": "remained_at_ruins",
+            "from_location_id": self.settlement_id,
+            "to_location_id": self.settlement_id,
+            "mobility_status": "ruin_survivor",
+            "travel_role": "survivor",
+            "stay_until_year": None,
+            "carried_evidence_ids": [],
+        })
+        return EffectResult(
+            success=True,
+            snapshot_before=snapshot,
+            message=f"{person.id}: remained at ruins {self.settlement_id}",
         )
 
 
@@ -534,6 +895,29 @@ class EffectResolver:
                 rel.last_interaction_year = snapshot["b_last_interaction_year"]
             else:
                 b.relationships.pop(effect.settlement_a, None)
+        elif isinstance(effect, StrengthenExchangeNetwork):
+            a = world.settlements[effect.settlement_a]
+            b = world.settlements[effect.settlement_b]
+            if snapshot["a_had_relationship"]:
+                rel = a.relationships[effect.settlement_b]
+                rel.exchange_counts = copy.deepcopy(snapshot["a_counts"])
+                rel.exchange_strengths = copy.deepcopy(
+                    snapshot["a_strengths"])
+                rel.exchange_last_years = copy.deepcopy(
+                    snapshot["a_last_years"])
+                rel.exchange_topics = copy.deepcopy(snapshot["a_topics"])
+            else:
+                a.relationships.pop(effect.settlement_b, None)
+            if snapshot["b_had_relationship"]:
+                rel = b.relationships[effect.settlement_a]
+                rel.exchange_counts = copy.deepcopy(snapshot["b_counts"])
+                rel.exchange_strengths = copy.deepcopy(
+                    snapshot["b_strengths"])
+                rel.exchange_last_years = copy.deepcopy(
+                    snapshot["b_last_years"])
+                rel.exchange_topics = copy.deepcopy(snapshot["b_topics"])
+            else:
+                b.relationships.pop(effect.settlement_a, None)
         elif isinstance(effect, (TransferControl, ChangeRuler)):
             world.settlements[effect.settlement_id].ruler_name = snapshot["ruler_name"]
         elif isinstance(effect, (DamageBuilding, ModifyInfrastructure)):
@@ -545,6 +929,65 @@ class EffectResolver:
                 stl.infrastructure.pop(building_type, None)
             if isinstance(effect, DamageBuilding):
                 world._restore_storage_snapshot(snapshot["storage"])
+        elif isinstance(effect, TransferEvidence):
+            evidence = world.evidence[effect.evidence_id]
+            evidence.location_id = snapshot["location_id"]
+            evidence.container_id = snapshot["container_id"]
+            evidence.holder_type = snapshot["holder_type"]
+            evidence.holder_id = snapshot["holder_id"]
+            evidence.storage_position = snapshot["storage_position"]
+            evidence.accessibility = snapshot["accessibility"]
+            evidence.location_history = copy.deepcopy(
+                snapshot["location_history"])
+            evidence.owner_type = snapshot["owner_type"]
+            evidence.owner_id = snapshot["owner_id"]
+            evidence.claimant_ids = list(snapshot["claimant_ids"])
+            evidence.physical_features = copy.deepcopy(
+                snapshot["physical_features"])
+            target_site_id = snapshot["target_site_id"]
+            if not snapshot["target_site_existed"]:
+                occupied = any(
+                    item.container_id == target_site_id
+                    for item in world.evidence.values())
+                if not occupied:
+                    world.storage_sites.pop(target_site_id, None)
+        elif isinstance(effect, MovePerson):
+            person = world.persons[effect.person_id]
+            person.current_location_id = snapshot["current_location_id"]
+            person.mobility_status = snapshot["mobility_status"]
+            person.travel_role = snapshot["travel_role"]
+            person.stay_until_year = snapshot["stay_until_year"]
+            person.carried_evidence_ids = list(
+                snapshot["carried_evidence_ids"])
+            person.movement_history = copy.deepcopy(
+                snapshot["movement_history"])
+        elif isinstance(effect, RelocatePopulation):
+            source = world.settlements[effect.source_settlement_id]
+            target = world.settlements[effect.target_settlement_id]
+            source.population = snapshot["source_population"]
+            source.peak_population = snapshot["source_peak_population"]
+            target.population = snapshot["target_population"]
+            target.peak_population = snapshot["target_peak_population"]
+        elif isinstance(effect, KillPerson):
+            person = world.persons[effect.person_id]
+            person.alive = snapshot["alive"]
+            person.death_year = snapshot["death_year"]
+            person.mobility_status = snapshot["mobility_status"]
+            person.travel_role = snapshot["travel_role"]
+            person.stay_until_year = snapshot["stay_until_year"]
+            person.carried_evidence_ids = list(
+                snapshot["carried_evidence_ids"])
+            person.movement_history = copy.deepcopy(
+                snapshot["movement_history"])
+        elif isinstance(effect, MarkRuinSurvivor):
+            person = world.persons[effect.person_id]
+            person.mobility_status = snapshot["mobility_status"]
+            person.travel_role = snapshot["travel_role"]
+            person.stay_until_year = snapshot["stay_until_year"]
+            person.carried_evidence_ids = list(
+                snapshot["carried_evidence_ids"])
+            person.movement_history = copy.deepcopy(
+                snapshot["movement_history"])
         elif isinstance(effect, DestroySettlement):
             stl = world.settlements[effect.settlement_id]
             stl.alive = snapshot["alive"]

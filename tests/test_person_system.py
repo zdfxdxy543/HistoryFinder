@@ -86,7 +86,12 @@ def test_wars_treaties_discoveries_and_rebellions_reference_people():
     assert wars and treaties and discoveries
     assert all(len(event.details.get("commander_ids", [])) == 2 for event in wars)
     assert all(event.person_ids for event in wars + treaties + discoveries)
-    assert all(len(event.person_ids) == len(set(event.person_ids)) == 2
+    assert all(len(event.details.get("signer_ids", [])) == 2
+               for event in treaties)
+    assert all(len(event.details["signer_ids"])
+               == len(set(event.details["signer_ids"]))
+               for event in treaties)
+    assert all(set(event.details["signer_ids"]).issubset(event.person_ids)
                for event in treaties)
 
     rebellion_world = World(seed=2)

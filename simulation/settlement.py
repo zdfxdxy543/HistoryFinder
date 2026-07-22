@@ -18,6 +18,10 @@ class RelationshipData:
     trade_volume: float = 0.0
     last_interaction_year: int = 0
     treaty_ids: list[str] = field(default_factory=list)
+    exchange_counts: dict[str, int] = field(default_factory=dict)
+    exchange_strengths: dict[str, float] = field(default_factory=dict)
+    exchange_last_years: dict[str, int] = field(default_factory=dict)
+    exchange_topics: dict[str, list[str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -27,6 +31,13 @@ class RelationshipData:
             "trade_volume": self.trade_volume,
             "last_interaction_year": self.last_interaction_year,
             "treaty_ids": list(self.treaty_ids),
+            "exchange_counts": dict(self.exchange_counts),
+            "exchange_strengths": dict(self.exchange_strengths),
+            "exchange_last_years": dict(self.exchange_last_years),
+            "exchange_topics": {
+                key: list(values)
+                for key, values in self.exchange_topics.items()
+            },
         }
 
     @classmethod
@@ -38,6 +49,22 @@ class RelationshipData:
             trade_volume=data.get("trade_volume", 0.0),
             last_interaction_year=data.get("last_interaction_year", 0),
             treaty_ids=data.get("treaty_ids", []),
+            exchange_counts={
+                str(key): int(value)
+                for key, value in data.get("exchange_counts", {}).items()
+            },
+            exchange_strengths={
+                str(key): float(value)
+                for key, value in data.get("exchange_strengths", {}).items()
+            },
+            exchange_last_years={
+                str(key): int(value)
+                for key, value in data.get("exchange_last_years", {}).items()
+            },
+            exchange_topics={
+                str(key): [str(item) for item in values]
+                for key, values in data.get("exchange_topics", {}).items()
+            },
         )
 
 
@@ -54,7 +81,7 @@ class Settlement:
     alive: bool = True
 
     # 版本
-    schema_version: int = 4
+    schema_version: int = 5
 
     # 人口
     population: int = 100

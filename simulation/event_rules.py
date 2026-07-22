@@ -23,6 +23,7 @@ from simulation.effects import (
     ModifyTreasury,
     TransferControl,
 )
+from simulation.mobility import settlement_connection_weight
 
 if TYPE_CHECKING:
     from simulation.world import World
@@ -144,11 +145,9 @@ class EventRule:
 
         weights = []
         for other in candidates:
-            rel = settlement.relationships.get(other.id)
-            if self.event_type == "war":
-                weights.append(0.05 + (rel.hostility if rel else 0.10) ** 2)
-            elif self.event_type == "trade":
-                weights.append(0.10 + (rel.trust if rel else 0.50))
+            if self.event_type in {"war", "trade"}:
+                weights.append(settlement_connection_weight(
+                    world, settlement, other, self.event_type))
             else:
                 weights.append(1.0)
         return rng.choices(candidates, weights=weights, k=1)[0].id
@@ -660,6 +659,8 @@ class EventRuleRegistry:
                    min(s.infrastructure.get("library", 0.0), 1.0)),
                 SF("cultural_momentum", 0.04, lambda w, s, y:
                    min(s.cultural_influence / 3.0, 1.0)),
+                SF("cultural_network", 0.03, lambda w, s, y:
+                   _exchange_network_factor(s, "cultural")),
                 SF("stability_factor", 0.03, lambda w, s, y: s.stability),
                 SF("treasury_high", 0.02, lambda w, s, y:
                    min(s.treasury / 500.0, 1.0)),
@@ -706,6 +707,8 @@ class EventRuleRegistry:
                    min(s.infrastructure.get("library", 0.0), 1.0)),
                 SF("theoretical_knowledge", 0.03, lambda w, s, y:
                    min(s.theoretical_knowledge / 3.0, 1.0)),
+                SF("scholarly_network", 0.04, lambda w, s, y:
+                   _exchange_network_factor(s, "scholarly")),
                 SF("population_factor", 0.02, lambda w, s, y:
                    min(s.population / 1200.0, 1.0)),
                 SF("treasury_high", 0.02, lambda w, s, y:
@@ -764,6 +767,8 @@ class EventRuleRegistry:
                    min(s.infrastructure.get("library", 0.0), 1.0)),
                 SF("theoretical_knowledge", 0.08, lambda w, s, y:
                    min(s.theoretical_knowledge, 1.0)),
+                SF("scholarly_network", 0.04, lambda w, s, y:
+                   _exchange_network_factor(s, "scholarly")),
             ],
             possible_outcomes=[
                 PO("tech_discovery", severity=0.25,
@@ -796,3 +801,11 @@ def _avg_hostility(settlement):
     if not settlement.relationships:
         return 0.1
     return sum(r.hostility for r in settlement.relationships.values()) / len(settlement.relationships)
+
+
+def _exchange_network_factor(settlement, channel: str) -> float:
+    strengths = [
+        relationship.exchange_strengths.get(channel, 0.0)
+        for relationship in settlement.relationships.values()
+    ]
+    return min(max(strengths, default=0.0) / 1.5, 1.0)

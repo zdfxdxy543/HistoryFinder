@@ -613,21 +613,26 @@ function PeoplePanel(props: {
 }) {
   const selectedInformant = props.selected?.kind === "informant";
   const selectedResident = props.selected?.kind === "resident";
-  const informantRole = props.informants.find((item) => item.id === props.selected?.id)?.role_name;
+  const selectedInformantProfile = props.informants.find(
+    (item) => item.id === props.selected?.id,
+  );
+  const informantRole = selectedInformantProfile?.presence_label;
   const selectedActivity = props.runtime?.npcs.find(
     (item) => item.id === props.selected?.id,
   )?.activity_name;
   return (
     <>
       <section className="panel-heading">
-        <p className="eyebrow">聚落居民</p>
+        <p className="eyebrow">聚落居民与访客</p>
         <h2>{props.selected?.name ?? "寻找可以请教的人"}</h2>
         <p>
           {selectedResident
             ? `${props.selected?.role_name} · ${selectedActivity ?? props.selected?.zone}。${props.selected?.description_cn}`
             : props.activeEvidence
               ? `${informantRole ?? "知情人"} · ${selectedActivity ?? "在聚落中"} · 当前准备出示：${props.activeEvidence.name}`
-              : "先检查一件证物，再走近合适的知情人。"}
+              : selectedInformantProfile
+                ? `${selectedInformantProfile.presence_label} · ${selectedActivity ?? "在聚落中"}`
+                : "先检查一件证物，再走近合适的知情人。"}
         </p>
       </section>
       {!selectedResident && (
@@ -658,7 +663,7 @@ function PeoplePanel(props: {
           return (
             <button key={person.id} className={active ? "person-row active" : "person-row"} onClick={() => props.onSelect(person.id)}>
               <span className={`role-swatch role-${person.role}`} />
-              <span><strong>{person.name}</strong><small>{person.role_name} · {activity ?? "在聚落中"}</small></span>
+              <span><strong>{person.name}</strong><small>{person.presence_label} · {activity ?? "在聚落中"}</small></span>
               {active && props.nearby && <span className="nearby-mark">邻近</span>}
             </button>
           );

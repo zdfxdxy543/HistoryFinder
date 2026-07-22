@@ -53,9 +53,13 @@ class Evidence:
     holder_id: Optional[str] = None
     storage_position: str = ""
     location_history: list[dict] = field(default_factory=list)
+    origin_location_id: str = ""
+    owner_type: str = "settlement"  # settlement / person / institution / unknown
+    owner_id: Optional[str] = None
+    claimant_ids: list[str] = field(default_factory=list)
 
     # 版本
-    schema_version: int = 6
+    schema_version: int = 7
 
     def to_dict(self) -> dict:
         return {
@@ -88,6 +92,10 @@ class Evidence:
             "holder_id": self.holder_id,
             "storage_position": self.storage_position,
             "location_history": [dict(item) for item in self.location_history],
+            "origin_location_id": self.origin_location_id,
+            "owner_type": self.owner_type,
+            "owner_id": self.owner_id,
+            "claimant_ids": list(self.claimant_ids),
         }
 
     @classmethod
@@ -123,6 +131,13 @@ class Evidence:
             storage_position=data.get("storage_position", ""),
             location_history=[dict(item) for item in data.get(
                 "location_history", [])],
+            origin_location_id=data.get(
+                "origin_location_id",
+                data.get("provenance_clues", {}).get(
+                    "origin_location_id", data.get("location_id", ""))),
+            owner_type=data.get("owner_type", "settlement"),
+            owner_id=data.get("owner_id", data.get("location_id")),
+            claimant_ids=list(data.get("claimant_ids", [])),
             schema_version=data.get("schema_version", 1),
         )
 
@@ -771,6 +786,9 @@ class EvidenceGenerator:
                     "origin_location_id": event.primary_location,
                     "carrier_subtype": subtype,
                 },
+                origin_location_id=event.primary_location,
+                owner_type="settlement",
+                owner_id=event.primary_location,
             )
             if is_written_carrier:
                 initialize_text_plan(evidence, self.seed)
@@ -824,6 +842,9 @@ class EvidenceGenerator:
                     },
                     contamination=["copyist_variation"],
                     authenticity="copy",
+                    origin_location_id=event.primary_location,
+                    owner_type="settlement",
+                    owner_id=event.primary_location,
                 )
                 if is_written_carrier:
                     initialize_text_plan(

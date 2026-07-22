@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from simulation.names import generate_unique_name
+from simulation.person import public_mobility_status, public_travel_role
 from simulation.technology import TECHNOLOGY_ARTIFACT_SUBTYPES
 
 
@@ -399,30 +400,56 @@ class LocalMapBuilder:
                 blocks_movement=blocks_movement,
             ))
 
+        npc_candidates = self._npc_candidates(
+            tiles, roads, occupied, profile)
+        informants = world.get_available_informants(settlement.id)
+        for index, informant in enumerate(informants):
+            person = world.persons.get(informant.person_id)
+            if person is None:
+                continue
+            home = world.settlements.get(person.settlement_id)
+            travel_name = public_travel_role(person)
+            public_status = public_mobility_status(person)
+            if public_status == "resident":
+                zone = "聚落公共区域"
+                description = ""
+            elif public_status == "survivor":
+                zone = "废墟幸存者营地"
+                description = (
+                    "一位仍留在此处废墟附近的"
+                    f"{travel_name or '幸存者'}。")
+            elif public_status == "captive" or not travel_name:
+                zone = "聚落公共区域"
+                description = f"一位{travel_name or '身份未明的外地人'}。"
+            else:
+                origin = home.name if home is not None else "外地"
+                zone = "外来者停留区"
+                description = (
+                    f"一位自称来自{origin}的{travel_name or '访客'}。")
+            position = self._next_walkable_free(
+                npc_candidates, occupied, index, tiles, profile)
+            occupied.add(position)
+            entities.append(LocalMapEntity(
+                id=informant.id,
+                kind="informant",
+                x=position[0],
+                y=position[1],
+                name=person.name,
+                subtype="person",
+                role=informant.role,
+                role_name=travel_name,
+                state=public_status,
+                zone=zone,
+                description_cn=description,
+            ))
         if settlement.alive:
-            npc_candidates = self._npc_candidates(
-                tiles, roads, occupied, profile)
-            informants = world.get_available_informants(settlement.id)
-            for index, informant in enumerate(informants):
-                person = world.persons.get(informant.person_id)
-                if person is None:
-                    continue
-                position = self._next_walkable_free(
-                    npc_candidates, occupied, index, tiles, profile)
-                occupied.add(position)
-                entities.append(LocalMapEntity(
-                    id=informant.id,
-                    kind="informant",
-                    x=position[0],
-                    y=position[1],
-                    name=person.name,
-                    subtype="person",
-                    role=informant.role,
-                    zone="聚落公共区域",
-                ))
             entities.extend(self._residents(
                 world, settlement, occupied, npc_candidates,
                 tiles, profile))
+        else:
+            entities.extend(self._ruin_survivors(
+                world, settlement, occupied, npc_candidates,
+                tiles, profile, {item.person_id for item in informants}))
 
         site_type = "settlement" if settlement.alive else "ruin"
         if not settlement.alive:
@@ -1298,6 +1325,69 @@ class LocalMapBuilder:
                     (chatter_offset + index) % len(DAILY_CHATTER)],
             ))
         return residents
+
+    def _ruin_survivors(self, world, settlement,
+                        occupied: set[tuple[int, int]],
+                        candidates: list[tuple[int, int]], tiles: list[int],
+                        profile: SettlementMapProfile,
+                        informant_person_ids: set[str]) -> list[LocalMapEntity]:
+        named = sorted((
+            person for person in world.persons.values()
+            if person.alive
+            and person.current_location_id == settlement.id
+            and person.mobility_status == "ruin_survivor"
+            and person.id not in informant_person_ids
+        ), key=lambda person: person.id)
+        survivors = []
+        for index, person in enumerate(named):
+            position = self._next_walkable_free(
+                candidates, occupied, index, tiles, profile)
+            occupied.add(position)
+            survivors.append(LocalMapEntity(
+                id=person.id,
+                kind="resident",
+                x=position[0],
+                y=position[1],
+                name=person.name,
+                subtype="person",
+                role=person.roles[0] if person.roles else "survivor",
+                role_name="废墟幸存者",
+                state="ruin_survivor",
+                zone="废墟幸存者营地",
+                description_cn=(
+                    f"一位在{settlement.name}毁灭后仍留在附近的幸存者。"),
+                dialogue_cn="我们在残墙外搭起住处，只在白天进入废墟寻找还能使用的东西。",
+            ))
+
+        generic_count = min(4, settlement.population // 8)
+        used_names = {person.name for person in world.persons.values()}
+        for index in range(generic_count):
+            position = self._next_walkable_free(
+                candidates, occupied, len(named) + index, tiles, profile)
+            occupied.add(position)
+            name = generate_unique_name(
+                self._stable_int(
+                    str(world.seed), settlement.id, "ruin_survivor",
+                    str(index)),
+                used_names,
+                "ruler",
+            )
+            used_names.add(name)
+            survivors.append(LocalMapEntity(
+                id=f"ruin_survivor_{settlement.id}_{index + 1:02d}",
+                kind="resident",
+                x=position[0],
+                y=position[1],
+                name=name,
+                subtype="person",
+                role="survivor",
+                role_name="幸存居民",
+                state="ruin_survivor",
+                zone="废墟幸存者营地",
+                description_cn="一位住在废墟边缘临时营地中的幸存居民。",
+                dialogue_cn="多数人已经离开，留下的人轮流看守营地和辨认废墟中的旧物。",
+            ))
+        return survivors
 
     def _player_start(self, tiles: list[int], roads: set[tuple[int, int]],
                       profile: SettlementMapProfile,

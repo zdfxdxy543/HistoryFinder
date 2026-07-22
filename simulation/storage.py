@@ -210,15 +210,28 @@ class StorageManager:
         return site
 
     def move_evidence(self, evidence, site: StorageSite, year: int,
-                      reason: str) -> None:
+                      reason: str, *, event_id: str | None = None,
+                      transfer_type: str = "storage",
+                      legitimacy: str = "routine") -> None:
         previous = evidence.container_id
         if previous == site.id:
             return
+        previous_site = self.sites.get(previous)
         evidence.location_history.append({
             "year": year,
+            "event_id": event_id,
+            "transfer_type": transfer_type,
+            "from_location_id": (
+                previous_site.settlement_id if previous_site else None),
+            "to_location_id": site.settlement_id,
             "from_container_id": previous,
             "to_container_id": site.id,
+            "from_holder_type": evidence.holder_type,
+            "from_holder_id": evidence.holder_id,
+            "to_holder_type": "site",
+            "to_holder_id": site.id,
             "reason": reason,
+            "legitimacy": legitimacy,
         })
         evidence.container_id = site.id
         evidence.holder_type = "site"

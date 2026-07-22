@@ -31,6 +31,14 @@ FORBIDDEN_KEYS = {
     "participants",
     "outcome_type",
     "created_year",
+    "mobility_status",
+    "travel_role",
+    "origin_location_id",
+    "stay_until_year",
+    "claimant_ids",
+    "owner_id",
+    "location_history",
+    "trigger_factors",
 }
 
 
@@ -666,9 +674,12 @@ def test_destroyed_settlement_loads_as_walkable_ruin_with_search_sites():
 
     assert local_map["site_type"] == "ruin"
     assert traveled["destination"]["site_type"] == "ruin"
-    assert not [
+    survivors = [
         item for item in local_map["entities"]
-        if item["kind"] in {"informant", "resident"}]
+        if item["kind"] == "resident"]
+    assert survivors
+    assert all(item["state"] == "ruin_survivor" for item in survivors)
+    assert all(item["dialogue_cn"] for item in survivors)
     reached = _reachable_positions(local_map)
     for target in (
             item for item in local_map["entities"]

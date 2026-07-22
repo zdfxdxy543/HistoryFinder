@@ -51,6 +51,13 @@ def test_relationship_data_roundtrip():
         trade_volume=50.0,
         last_interaction_year=25,
         treaty_ids=["tr_001", "tr_002"],
+        exchange_counts={"trade": 4, "scholarly": 2},
+        exchange_strengths={"trade": 1.12, "scholarly": 0.68},
+        exchange_last_years={"trade": 25, "scholarly": 24},
+        exchange_topics={
+            "trade": ["compound_pulley"],
+            "scholarly": ["mechanics"],
+        },
     )
     data = r1.to_dict()
     r2 = RelationshipData.from_dict(data)
@@ -59,6 +66,27 @@ def test_relationship_data_roundtrip():
     assert r2.trust == 0.8
     assert r2.trade_volume == 50.0
     assert r2.treaty_ids == ["tr_001", "tr_002"]
+    assert r2.exchange_counts == {"trade": 4, "scholarly": 2}
+    assert r2.exchange_strengths == {"trade": 1.12, "scholarly": 0.68}
+    assert r2.exchange_last_years == {"trade": 25, "scholarly": 24}
+    assert r2.exchange_topics["trade"] == ["compound_pulley"]
+
+
+def test_legacy_relationship_defaults_to_empty_exchange_networks():
+    legacy = RelationshipData(
+        partner_id="stl_0002", trust=0.6).to_dict()
+    for key in (
+        "exchange_counts", "exchange_strengths",
+        "exchange_last_years", "exchange_topics",
+    ):
+        legacy.pop(key)
+
+    restored = RelationshipData.from_dict(legacy)
+
+    assert restored.exchange_counts == {}
+    assert restored.exchange_strengths == {}
+    assert restored.exchange_last_years == {}
+    assert restored.exchange_topics == {}
 
 
 def test_event_roundtrip():
@@ -170,7 +198,7 @@ def test_old_world_save_migrates_missing_document_text_to_a_lazy_plan():
 
     restored = World.from_dict(data)
     document = restored.evidence[document_data["id"]]
-    assert document.schema_version == 6
+    assert document.schema_version == 7
     assert "written_content" not in document.content_data
     assert document.content_data["text_plan"]["materialization_status"] \
         == "planned"

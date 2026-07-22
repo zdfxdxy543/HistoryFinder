@@ -5,6 +5,7 @@ import random
 
 from simulation.effects import DamageBuilding, DestroySettlement, EffectResolver
 from simulation.evidence import Evidence, tick_natural_decay
+from simulation.events import HistoricalEvent
 from simulation.storage import StorageManager, StorageSite
 from simulation.world import World
 from viewer.data import build_world_payload
@@ -30,7 +31,37 @@ def test_generated_evidence_has_valid_persistent_location():
 
 
 def test_documents_are_sorted_into_domain_specific_collections():
-    world = _world(30)
+    world = _world(0)
+    settlement = next(iter(world.settlements.values()))
+    world._add_event_with_evidence(HistoricalEvent(
+        id="event_storage_literature",
+        year=1,
+        event_type="literary_work",
+        title="A chronicle",
+        severity=0.2,
+        primary_location=settlement.id,
+        participants=[settlement.id],
+        details={
+            "genre": "chronicle",
+            "work_title": "Storage Chronicle",
+            "author_name": "Test Author",
+        },
+    ))
+    world._add_event_with_evidence(HistoricalEvent(
+        id="event_storage_theory",
+        year=2,
+        event_type="theoretical_work",
+        title="A treatise",
+        severity=0.2,
+        primary_location=settlement.id,
+        participants=[settlement.id],
+        details={
+            "theory_field": "mechanics",
+            "theory_field_name": "力学",
+            "work_title": "Storage Treatise",
+            "author_name": "Test Scholar",
+        },
+    ))
     expected = {
         "founding_charter": "administrative_archive",
         "literary_manuscript": "library_collection",
@@ -170,7 +201,7 @@ def test_storage_roundtrip_and_legacy_migration():
     assert migrated.storage_sites
     assert all(item.container_id in migrated.storage_sites
                for item in migrated.evidence.values())
-    assert all(item.schema_version == 6 for item in migrated.evidence.values())
+    assert all(item.schema_version == 7 for item in migrated.evidence.values())
 
 
 def test_viewer_payload_exposes_storage_relationships():

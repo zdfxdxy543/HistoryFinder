@@ -18,6 +18,11 @@ from game.investigation import (
 from game.knowledge import PlayerKnowledge
 from game.local_map import LocalMapBuilder, build_evidence_targets
 from game.local_time import LocalTimeSimulation
+from simulation.person import (
+    HIDDEN_TRAVEL_ROLES,
+    public_mobility_status,
+    public_travel_role,
+)
 from game.observation import build_evidence_observations
 from narrative.context_builder import build_evidence_context
 from narrative.document_reader import (
@@ -551,6 +556,10 @@ class PlayerSession:
     def _evidence_payload(self, evidence) -> dict:
         view = EvidencePublicView.from_evidence(evidence)
         payload = view.to_dict()
+        # Raw feature codes and analysis routing are investigation internals.
+        payload.pop("tags", None)
+        payload.pop("analysis_domains", None)
+        payload.pop("location_id", None)
         payload["can_read"] = has_text_carrier(evidence)
         payload["quick_read"] = is_public_inscription(evidence)
         payload["description_cn"] = self._glance_description(evidence)
@@ -645,11 +654,39 @@ class PlayerSession:
 
     def _informant_payload(self, informant) -> dict:
         person = self.world.persons[informant.person_id]
+        home = self.world.settlements.get(person.settlement_id)
+        base_role_name = ROLE_NAMES.get(informant.role, informant.role)
+        travel_role_name = public_travel_role(person)
+        public_status = public_mobility_status(person)
+        claimed_origin_name = ""
+        origin_knowledge_status = "unknown"
+        if public_status == "resident":
+            presence_label = f"{base_role_name} · 本地居民"
+        elif public_status == "survivor":
+            presence_label = f"{travel_role_name or '幸存者'} · 留在此处废墟"
+        elif person.travel_role == "captive" or (
+                person.travel_role in HIDDEN_TRAVEL_ROLES):
+            presence_label = travel_role_name or "身份未明的外地人"
+        else:
+            claimed_origin_name = home.name if home is not None else ""
+            if claimed_origin_name:
+                origin_knowledge_status = "self_reported"
+                presence_label = (
+                    f"{travel_role_name or base_role_name} · 自称来自"
+                    f"{claimed_origin_name}")
+            else:
+                presence_label = travel_role_name or "外地访客"
         return {
             "id": informant.id,
             "name": person.name,
             "role": informant.role,
-            "role_name": ROLE_NAMES.get(informant.role, informant.role),
+            "role_name": travel_role_name or base_role_name,
+            "base_role_name": base_role_name,
+            "public_status": public_status,
+            "public_role_name": travel_role_name or base_role_name,
+            "claimed_origin_name": claimed_origin_name,
+            "origin_knowledge_status": origin_knowledge_status,
+            "presence_label": presence_label,
         }
 
     def _held_knowledge(self, informant) -> tuple[HeldKnowledgeView, ...]:

@@ -109,6 +109,12 @@ export type Informant = {
   name: string;
   role: string;
   role_name: string;
+  base_role_name: string;
+  public_status: "resident" | "visitor" | "survivor" | "captive";
+  public_role_name: string;
+  claimed_origin_name: string;
+  origin_knowledge_status: "unknown" | "self_reported" | "documented" | "corroborated";
+  presence_label: string;
 };
 
 export type Journal = {

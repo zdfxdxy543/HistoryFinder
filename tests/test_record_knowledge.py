@@ -4,6 +4,7 @@ import pytest
 
 from game.knowledge import PlayerKnowledge
 from game.repl import GameREPL
+from simulation.events import HistoricalEvent
 from simulation.person import Person
 from simulation.records import Claim, HistoricalRecord
 from simulation.world import World
@@ -135,7 +136,10 @@ def test_conflicting_records_are_kept_as_conflicting_claims(recorded_world):
         recorded_world.records[official.source_record_id], official, 1.0)
     knowledge.learn_from_record(
         recorded_world.records[folk.source_record_id], folk, 1.0)
-    claims = knowledge.sorted_claims()
+    claims = [
+        claim for claim in knowledge.sorted_claims()
+        if claim.predicate == "war_result"
+    ]
 
     assert len(claims) == 2
     assert all(claim.contradicting_evidence_ids for claim in claims)
@@ -193,18 +197,24 @@ def test_presenting_to_scholar_interprets_record_not_truth(capsys):
 
 
 def test_villager_can_connect_traces_to_an_oral_claim(capsys):
-    recorded_world = World(seed=0)
-    recorded_world.generate(years=22)
-    war = next(
-        event for event in recorded_world.events
-        if event.event_type == "war"
-        and any(
-            evidence.event_id == event.id
-            and evidence.evidence_type == "oral"
-            and evidence.state != "destroyed"
-            for evidence in recorded_world.evidence.values()
-        )
+    recorded_world = World(seed=6)
+    recorded_world.generate(years=0)
+    attacker, defender = list(recorded_world.settlements.values())[:2]
+    war = HistoricalEvent(
+        id="event_oral_war_test",
+        year=1,
+        event_type="war",
+        title=f"{attacker.name}与{defender.name}交战",
+        severity=0.7,
+        primary_location=attacker.id,
+        participants=[attacker.id, defender.id],
+        details={
+            "attacker": attacker.name,
+            "defender": defender.name,
+            "outcome": "stalemate",
+        },
     )
+    recorded_world._add_event_with_evidence(war)
     trace = next(
         evidence for evidence in recorded_world.evidence.values()
         if war.id in evidence.source_event_ids

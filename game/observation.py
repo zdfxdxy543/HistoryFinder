@@ -16,6 +16,7 @@ OBSERVATION_TYPES = {
     "legibility": "script",
     "delivery": "delivery",
     "variation": "variation",
+    "provenance": "provenance_trace",
 }
 
 
@@ -34,6 +35,7 @@ def _observation_sentence(namespace: str, phrase: str) -> str:
         "legibility": f"文字保存情况为：{phrase}。",
         "delivery": f"讲述方式表现为：{phrase}。",
         "variation": f"不同复述之间可观察到：{phrase}。",
+        "provenance": f"保管与转移痕迹显示：{phrase}。",
     }
     return templates.get(namespace, f"可见特征：{phrase}。")
 

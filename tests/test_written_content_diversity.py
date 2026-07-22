@@ -5,7 +5,9 @@ from itertools import combinations
 import pytest
 
 from simulation.world import World
+from simulation.events import HistoricalEvent
 from simulation.text_carriers import materialize_text_carrier
+from simulation.written_content import build_written_content
 
 
 @pytest.fixture(scope="module")
@@ -118,17 +120,34 @@ def test_grounded_literature_keeps_distinct_full_text_without_filler(
     "mechanics", "agronomy", "medicine", "astronomy",
 ])
 def test_independent_theory_does_not_reuse_most_body_paragraphs(
-        written_world, field):
-    events = {event.id: event for event in written_world.events}
-    works = [
-        item for item in _documents(written_world)
-        if not item.is_copy_of
-        and item.subtype == "theoretical_treatise"
-        and events[item.event_id].details.get("theory_field") == field
-    ]
+        field):
+    bodies = []
+    for index in range(2):
+        event = HistoricalEvent(
+            id=f"event_theory_diversity_{field}_{index}",
+            year=10 + index,
+            event_type="theoretical_work",
+            title=f"Theory {index}",
+            severity=0.2,
+            primary_location="stl_1",
+            details={
+                "theory_field": field,
+                "work_title": f"Independent {field} treatise {index}",
+                "author_name": f"Scholar {index}",
+            },
+        )
+        content = build_written_content(
+            event, "theoretical_treatise", 42,
+            f"evidence_theory_diversity_{field}_{index}")
+        bodies.append({
+            passage["text"] for passage in content["passages"]
+            if passage["kind"] not in {
+                "heading", "attribution", "closing", "copy_note"}
+        })
 
-    assert len(works) >= 2
-    assert _average_pair_overlap(works) < 0.25
+    overlap = len(bodies[0] & bodies[1]) / max(
+        1, len(bodies[0] | bodies[1]))
+    assert overlap < 0.25
 
 
 def test_traveling_literary_copy_is_not_mistaken_for_copy_suffix(

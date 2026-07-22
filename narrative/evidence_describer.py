@@ -57,6 +57,14 @@ PHRASES = {
         "geometric_pattern": "带有重复的几何纹样", "dark_fold": "折叠处颜色明显较深",
         "no_clear_mark": "没有发现清晰的人工标记",
     },
+    "provenance": {
+        "foreign_storage_label": "外层编号方式与当前保管地点的其他藏品不同",
+        "removed_owner_mark": "一处旧有的所有者标记似乎被刮除后重新刻写",
+        "emergency_wrapping": "外层包裹使用了大小不一的临时封条和粗绳",
+        "concealed_transport_wrap": "外层包裹没有常见货签，夹层却留有拆封痕迹",
+        "mismatched_inventory_mark": "现有入库编号覆盖在另一套较旧的登记记号之上",
+        "return_inspection_seal": "封口并列留有交还方与复验方的两种印记",
+    },
     "form": {
         "asymmetric": "形状左右并不完全对称",
         "riveted_parts": "几个部件原本似乎由铆钉连接",
@@ -219,6 +227,9 @@ def describe_evidence(context: dict) -> str:
     opening = _stable_choice(grammar.get(evidence_type, grammar["artifact"]), features)
 
     detail_parts = [mark, condition]
+    if tags.get("provenance"):
+        detail_parts.append(_phrase(
+            tags, "provenance", "留有异地保管或转移形成的痕迹"))
     if evidence_type == "document":
         detail_parts.extend([
             _phrase(tags, "script", "可以看见少量书写痕迹"),

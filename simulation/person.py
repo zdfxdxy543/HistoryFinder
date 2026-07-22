@@ -8,6 +8,37 @@ from dataclasses import dataclass, field
 from simulation.names import generate_name
 
 
+TRAVEL_ROLE_NAMES = {
+    "merchant": "商旅",
+    "visiting_scholar": "访问学者",
+    "envoy": "使者",
+    "refugee": "流民",
+    "captive": "俘虏",
+    "survivor": "废墟幸存者",
+    "disaster_casualty": "灾难死者",
+}
+
+HIDDEN_TRAVEL_ROLES = {"thief", "smuggler", "fugitive", "spy"}
+
+
+def public_travel_role(person) -> str:
+    """Return only a role that the person presents openly in public."""
+    if person.travel_role in HIDDEN_TRAVEL_ROLES:
+        return ""
+    return TRAVEL_ROLE_NAMES.get(person.travel_role, "")
+
+
+def public_mobility_status(person) -> str:
+    """Collapse simulation-only movement states into observable categories."""
+    if person.mobility_status == "resident":
+        return "resident"
+    if person.mobility_status == "ruin_survivor":
+        return "survivor"
+    if person.travel_role == "captive":
+        return "captive"
+    return "visitor"
+
+
 @dataclass
 class Person:
     id: str
@@ -19,7 +50,17 @@ class Person:
     roles: list[str] = field(default_factory=list)
     parent_ids: list[str] = field(default_factory=list)
     spouse_ids: list[str] = field(default_factory=list)
-    schema_version: int = 1
+    current_location_id: str = ""
+    mobility_status: str = "resident"
+    travel_role: str = ""
+    stay_until_year: int | None = None
+    carried_evidence_ids: list[str] = field(default_factory=list)
+    movement_history: list[dict] = field(default_factory=list)
+    schema_version: int = 2
+
+    def __post_init__(self) -> None:
+        if not self.current_location_id:
+            self.current_location_id = self.settlement_id
 
     def age_at(self, year: int) -> int:
         return max(0, year - self.birth_year)
@@ -44,6 +85,12 @@ class Person:
             "roles": list(self.roles),
             "parent_ids": list(self.parent_ids),
             "spouse_ids": list(self.spouse_ids),
+            "current_location_id": self.current_location_id,
+            "mobility_status": self.mobility_status,
+            "travel_role": self.travel_role,
+            "stay_until_year": self.stay_until_year,
+            "carried_evidence_ids": list(self.carried_evidence_ids),
+            "movement_history": [dict(item) for item in self.movement_history],
         }
 
     @classmethod
@@ -58,6 +105,14 @@ class Person:
             roles=list(data.get("roles", [])),
             parent_ids=list(data.get("parent_ids", [])),
             spouse_ids=list(data.get("spouse_ids", [])),
+            current_location_id=data.get(
+                "current_location_id", data["settlement_id"]),
+            mobility_status=data.get("mobility_status", "resident"),
+            travel_role=data.get("travel_role", ""),
+            stay_until_year=data.get("stay_until_year"),
+            carried_evidence_ids=list(data.get("carried_evidence_ids", [])),
+            movement_history=[
+                dict(item) for item in data.get("movement_history", [])],
             schema_version=data.get("schema_version", 1),
         )
 

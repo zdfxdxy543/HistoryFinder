@@ -238,16 +238,17 @@ class InformantManager:
     def active_informants(self, world, settlement_id: str,
                           roles: set[str] | None = None) -> list[Informant]:
         settlement = world.settlements.get(settlement_id)
-        if settlement is None or not settlement.alive:
+        if settlement is None:
             return []
         result = []
         for informant in self.informants.values():
-            if informant.settlement_id != settlement_id:
-                continue
             if roles is not None and informant.role not in roles:
                 continue
             person = world.persons.get(informant.person_id)
-            if person is not None and person.alive:
+            if (person is not None and person.alive
+                    and person.current_location_id == settlement_id
+                    and (settlement.alive
+                         or person.mobility_status == "ruin_survivor")):
                 result.append(informant)
         return sorted(result, key=lambda item: (item.role, item.id))
 
@@ -289,7 +290,11 @@ class InformantManager:
 
     def _active_for_role(self, world, settlement_id: str,
                          role: str) -> Informant | None:
-        active = self.active_informants(world, settlement_id, {role})
+        active = [
+            informant for informant in self.active_informants(
+                world, settlement_id, {role})
+            if informant.settlement_id == settlement_id
+        ]
         return active[0] if active else None
 
     def _latest_for_role(self, settlement_id: str,
@@ -308,6 +313,7 @@ class InformantManager:
         candidates = [
             person for person in world.persons.values()
             if person.alive and person.settlement_id == settlement_id
+            and person.current_location_id == settlement_id
             and person.id not in registered and person_role in person.roles
         ]
         return sorted(candidates, key=lambda item: item.id)[0] \

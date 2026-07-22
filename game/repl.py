@@ -430,7 +430,8 @@ class GameREPL:
         }
         candidates = [
             person for person in self.world.persons.values()
-            if person.alive and person.settlement_id == self.current_location_id
+            if person.alive
+            and person.current_location_id == self.current_location_id
             and person.id not in registered
             and roles.intersection(person.roles)
         ]

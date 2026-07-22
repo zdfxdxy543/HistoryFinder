@@ -220,7 +220,7 @@ class RecordGenerator:
         author_person_id = self._select_author(event, perspective, persons)
         author_faction_id = None if author_person_id else event.primary_location
         claims, distortions, omitted = self._build_claims(
-            record_id, event, perspective, settlements)
+            record_id, event, perspective, settlements, subtype)
         audience = {
             "official": "administrators",
             "opposition": "supporters",
@@ -283,7 +283,8 @@ class RecordGenerator:
         return candidates[0].id if candidates and perspective != "folk" else None
 
     def _build_claims(self, record_id: str, event, perspective: str,
-                      settlements: dict) -> tuple[list[Claim], list[str], list[str]]:
+                      settlements: dict, carrier_subtype: str = ""
+                      ) -> tuple[list[Claim], list[str], list[str]]:
         primary = settlements.get(event.primary_location)
         subject = primary.name if primary else event.primary_location
         start_year = event.year
@@ -305,7 +306,7 @@ class RecordGenerator:
         if perspective == "folk":
             distortions.append("names_or_numbers_may_vary")
 
-        claim = Claim(
+        claims = [Claim(
             id=f"{record_id}:claim:1",
             subject=subject,
             predicate=predicate,
@@ -313,8 +314,146 @@ class RecordGenerator:
             statement_cn=statement,
             time_range=(start_year, end_year),
             qualifiers=qualifiers,
-        )
-        return [claim], distortions, omitted
+        )]
+        registered_transfers = (
+            event.details.get("object_transfers", [])
+            if carrier_subtype in {
+                "trade_ledger", "war_record", "trial_record",
+                "treaty_tablet", "treaty_pillar"} else [])
+        for index, transfer in enumerate(registered_transfers, start=2):
+            item_name = transfer.get("evidence_name", "一件物品")
+            destination = transfer.get("to_location_name", "另一处聚落")
+            transfer_type = transfer.get("transfer_type", "transfer")
+            statements = {
+                "trade": f"这份记录声称，{item_name}被交付给{destination}。",
+                "war_spoils": (
+                    f"这份记录把{item_name}列为运往{destination}的战利品。"),
+                "evacuation": (
+                    f"这份记录声称，{item_name}被紧急转移到{destination}保管。"),
+                "theft": (
+                    f"审理记录称，{item_name}失窃后被带往{destination}。"),
+                "smuggling": (
+                    f"这份账目把{item_name}列入送往{destination}的未验货物。"),
+                "resale": (
+                    f"这份账目声称，{item_name}经转手后交付{destination}。"),
+                "recovery": (
+                    f"立约文书声称，{item_name}已交还{destination}复验。"),
+            }
+            claims.append(Claim(
+                id=f"{record_id}:claim:{index}",
+                subject=item_name,
+                predicate="object_transferred",
+                object=destination,
+                statement_cn=statements.get(
+                    transfer_type,
+                    f"这份记录声称，{item_name}被转移到{destination}。"),
+                time_range=(start_year, end_year),
+                qualifiers=qualifiers + [f"transfer_type:{transfer_type}"],
+            ))
+        movement_subtypes = {
+            "trade_ledger", "war_record", "treaty_tablet", "treaty_pillar",
+        }
+        registered_movements = (
+            event.details.get("person_movements", [])
+            if carrier_subtype in movement_subtypes else [])
+        for movement in registered_movements:
+            person_name = movement.get("person_name", "一名未具名者")
+            destination = movement.get("to_location_name", "另一处聚落")
+            movement_type = movement.get("movement_type", "travel")
+            statements = {
+                "trade_visit": (
+                    f"这份记录称，商旅{person_name}抵达{destination}经手货物。"),
+                "captive_transfer": (
+                    f"这份记录把{person_name}列为押往{destination}的俘虏。"),
+                "diplomatic_mission": (
+                    f"这份记录称，使者{person_name}抵达{destination}参与立约。"),
+            }
+            claim_index = len(claims) + 1
+            claims.append(Claim(
+                id=f"{record_id}:claim:{claim_index}",
+                subject=person_name,
+                predicate="person_moved",
+                object=destination,
+                statement_cn=statements.get(
+                    movement_type,
+                    f"这份记录称，{person_name}前往{destination}。"),
+                time_range=(start_year, end_year),
+                qualifiers=qualifiers + [f"movement_type:{movement_type}"],
+            ))
+        knowledge_subtypes = {
+            "trade_ledger", "research_notes", "theoretical_treatise",
+            "lecture_notes", "literary_manuscript",
+            "traveling_literary_copy",
+        }
+        registered_knowledge = (
+            event.details.get("knowledge_transfers", [])
+            if carrier_subtype in knowledge_subtypes else [])
+        for transfer in registered_knowledge:
+            person_name = transfer.get("person_name", "一名来访者")
+            topic_name = transfer.get("topic_name", "一项知识")
+            destination = transfer.get("target_location_name", "另一处聚落")
+            dimension = transfer.get("dimension", "knowledge")
+            statements = {
+                "technology": (
+                    f"这份记录称，{person_name}在{destination}展示了"
+                    f"{topic_name}的构造与使用方法。"),
+                "theory": (
+                    f"这份记录称，{person_name}在{destination}讲授了"
+                    f"关于{topic_name}的论证与验证方法。"),
+                "culture": (
+                    f"这份记录称，{person_name}把《{topic_name}》带到"
+                    f"{destination}诵读或抄写。"),
+            }
+            claim_index = len(claims) + 1
+            claims.append(Claim(
+                id=f"{record_id}:claim:{claim_index}",
+                subject=topic_name,
+                predicate="knowledge_transferred",
+                object=destination,
+                statement_cn=statements.get(
+                    dimension,
+                    f"这份记录称，{person_name}把{topic_name}带到了"
+                    f"{destination}。"),
+                time_range=(start_year, end_year),
+                qualifiers=qualifiers + [
+                    f"knowledge_dimension:{dimension}",
+                    f"transfer_type:{transfer.get('transfer_type', 'travel')}",
+                    f"topic_key:{transfer.get('topic_key', '')}",
+                ],
+            ))
+        for update in event.details.get("network_updates", []):
+            if update.get("status_before") == update.get("status_after"):
+                continue
+            if carrier_subtype not in knowledge_subtypes:
+                continue
+            source = update.get("source_location_name", "一处聚落")
+            target = update.get("target_location_name", "另一处聚落")
+            channel = update.get("channel", "exchange")
+            channel_name = {
+                "trade": "商贸往来",
+                "scholarly": "学术往来",
+                "cultural": "文化传抄",
+            }.get(channel, "定期往来")
+            status_name = {
+                "regular": "形成固定往来",
+                "established": "成为稳定网络",
+            }.get(update.get("status_after"), "开始往来")
+            claim_index = len(claims) + 1
+            claims.append(Claim(
+                id=f"{record_id}:claim:{claim_index}",
+                subject=f"{source}与{target}",
+                predicate="exchange_network_formed",
+                object=channel_name,
+                statement_cn=(
+                    f"这份记录声称，{source}与{target}之间的{channel_name}"
+                    f"已经{status_name}。"),
+                time_range=(start_year, end_year),
+                qualifiers=qualifiers + [
+                    f"exchange_channel:{channel}",
+                    f"network_status:{update.get('status_after', 'nascent')}",
+                ],
+            ))
+        return claims, distortions, omitted
 
     def _event_claim(self, event, perspective: str, subject: str,
                      settlements: dict) -> tuple[str, str, str]:

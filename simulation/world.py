@@ -34,6 +34,15 @@ from simulation.text_carriers import (
 )
 from simulation.technology import TECHNOLOGY_CATALOG
 from simulation.research import generate_research_process
+from simulation.mobility import (
+    describe_person_movements,
+    plan_disaster_population_displacement,
+    plan_event_exchange_networks,
+    plan_event_knowledge_transfers,
+    plan_event_person_movements,
+    plan_supplemental_event_transfers,
+    plan_event_transfers,
+)
 from simulation.pressures import compute_all_pressures, tick_economy
 from simulation.event_rules import EventRuleRegistry, EventRuleResult
 from simulation.effects import (
@@ -51,6 +60,8 @@ from simulation.effects import (
     ModifyTechnologyLevel,
     ModifyTheoreticalKnowledge,
     ModifyTreasury,
+    MovePerson,
+    StrengthenExchangeNetwork,
     TransferControl,
     effect_to_dict,
 )
@@ -213,6 +224,7 @@ class World:
                 tick_economy(stl, self, rng)
 
         # Phase B2: notable-person mortality and political succession.
+        self._tick_person_mobility(year)
         self._tick_people(year)
         self._informant_mgr.ensure_all_roles(self, year)
 
@@ -230,6 +242,10 @@ class World:
 
         # Phase H: 证据衰减
         self._tick_evidence_decay(year, rng)
+
+        # Event-linked travel can temporarily empty a local office after the
+        # early-year staffing pass. Appoint an acting holder before year end.
+        self._informant_mgr.ensure_all_roles(self, year)
 
     def get_pressure(self, settlement_id: str, pressure_name: str) -> float:
         """获取某个聚落的某个压力指标值。"""
@@ -286,11 +302,39 @@ class World:
         candidates = [
             person for person in self.persons.values()
             if person.alive and person.settlement_id == settlement_id
+            and person.current_location_id == settlement_id
             and role in person.roles
         ]
         if candidates:
             return sorted(candidates, key=lambda person: person.id)[0]
         return self._create_notable_person(settlement_id, year, role)
+
+    def _tick_person_mobility(self, year: int) -> None:
+        """Return temporary visitors, or strand them if home was destroyed."""
+        returning = sorted((
+            person for person in self.persons.values()
+            if person.alive
+            and person.mobility_status in {"visitor", "envoy"}
+            and person.stay_until_year is not None
+            and year > person.stay_until_year
+        ), key=lambda person: person.id)
+        for person in returning:
+            home = self.settlements.get(person.settlement_id)
+            if home is None or not home.alive:
+                person.mobility_status = "displaced"
+                person.travel_role = "refugee"
+                person.stay_until_year = None
+                person.carried_evidence_ids = []
+                continue
+            effect = MovePerson(
+                person_id=person.id,
+                target_settlement_id=home.id,
+                movement_type="return_home",
+                mobility_status="resident",
+                travel_role="",
+                stay_until_year=None,
+            )
+            self._effect_resolver.apply_effects([effect], self)
 
     def _tick_people(self, year: int) -> None:
         deaths = [
@@ -442,13 +486,18 @@ class World:
         if event.event_type == "disaster":
             event.process_id = f"disaster_aftermath:{event.id}"
 
+        # Cross-settlement transfers are planned against the pre-event state
+        # and participate in the same transaction as the event's other effects.
+        transfer_effects = plan_event_transfers(self, event, result)
+        concrete_effects = transfer_effects + result.concrete_effects
+
         # 应用 effects
         effect_ids = self._effect_resolver.apply_effects(
-            result.concrete_effects, self)
-        if result.concrete_effects and not effect_ids:
+            concrete_effects, self)
+        if concrete_effects and not effect_ids:
             return
         event.effect_ids = effect_ids
-        event.effects = [effect_to_dict(effect) for effect in result.concrete_effects]
+        event.effects = [effect_to_dict(effect) for effect in concrete_effects]
 
         # importance 和 visibility
         event.importance_score = result.selected_outcome.severity
@@ -465,7 +514,7 @@ class World:
 
         # 添加事件和证据
         self._add_event_with_evidence(event)
-        self._record_effect_sources(event, result.concrete_effects)
+        self._record_effect_sources(event, concrete_effects)
 
         # 对战争结果特殊处理：摧毁或 pending
         if event.event_type == "war":
@@ -1129,6 +1178,9 @@ class World:
                 record(effect.settlement_b, "trust", trust_direction)
                 record(effect.settlement_a, "hostility", hostility_direction)
                 record(effect.settlement_b, "hostility", hostility_direction)
+            elif isinstance(effect, StrengthenExchangeNetwork):
+                record(effect.settlement_a, "exchange_network", 1)
+                record(effect.settlement_b, "exchange_network", 1)
             elif isinstance(effect, (TransferControl, ChangeRuler)):
                 record(effect.settlement_id, "ruler", 1)
             elif isinstance(effect, (DamageBuilding, ModifyInfrastructure)):
@@ -1172,6 +1224,9 @@ class World:
 
             winner = self.settlements.get(winner_id)
             loser = self.settlements.get(loser_id)
+            both_sides_alive = bool(
+                winner is not None and winner.alive
+                and loser is not None and loser.alive)
             war_event_id = next((
                 event.id for event in reversed(self.events)
                 if event.event_type == "war" and event.year == war_year
@@ -1180,7 +1235,7 @@ class World:
 
             # 战后 2~6 年：可能签订和约
             if 2 <= years_after <= 6 and rng.random() < 0.25:
-                if winner and loser and loser.alive:
+                if both_sides_alive:
                     event = self._event_gen.generate_treaty_event(
                         year, winner.id, winner.name, loser.id, loser.name,
                         winner.id, "peace")
@@ -1191,7 +1246,7 @@ class World:
 
             # 战后 1~3 年：可能发生报复袭击
             if 1 <= years_after <= 3 and rng.random() < 0.20:
-                if winner and loser and loser.alive:
+                if both_sides_alive:
                     event = self._event_gen.generate_raid_event(
                         year, loser.id, loser.name, winner.id, winner.name, winner.id)
                     if war_event_id:
@@ -1200,7 +1255,7 @@ class World:
 
             # 战后 5~15 年：可能结盟
             if 5 <= years_after <= 15 and rng.random() < 0.15:
-                if winner and loser and loser.alive:
+                if both_sides_alive:
                     event = self._event_gen.generate_treaty_event(
                         year, winner.id, winner.name, loser.id, loser.name,
                         winner.id, "alliance")
@@ -1209,7 +1264,8 @@ class World:
                     self._attach_current_rulers(event)
                     self._add_event_with_evidence(event)
 
-            # 保留 pending（最多 20 年）
+            # 失效链保留到原期限，以维持既有种子的随机数序列；
+            # both_sides_alive 会确保它不再生成任何事件。
             if years_after < 20:
                 remaining.append((winner_id, war_year, loser_id))
 
@@ -1222,7 +1278,8 @@ class World:
         used_ids = set()
         for settlement_id in event.participants:
             settlement = self.settlements.get(settlement_id)
-            ruler = self.persons.get(settlement.ruler_id) if settlement else None
+            ruler = self.persons.get(settlement.ruler_id) \
+                if settlement is not None and settlement.alive else None
             signer = ruler if ruler is not None and ruler.alive else None
             if signer is not None and signer.id in used_ids:
                 signer = self._get_or_create_officeholder(
@@ -1251,18 +1308,28 @@ class World:
                 partner = self.settlements.get(partner_id)
                 if partner is None or not partner.alive:
                     continue
-                if relationship.trust < 0.55 and relationship.trade_volume <= 0:
+                cultural_network = relationship.exchange_strengths.get(
+                    "cultural", 0.0)
+                if (relationship.trust < 0.55
+                        and relationship.trade_volume <= 0
+                        and cultural_network <= 0):
                     continue
+                connection_score = (
+                    relationship.trust
+                    + min(relationship.trade_volume / 100.0, 0.5)
+                    + min(cultural_network * 0.25, 0.75))
                 partners.append((
-                    relationship.trust,
+                    connection_score,
                     relationship.trade_volume,
+                    cultural_network,
                     partner.id,
                     partner,
                 ))
             if not partners:
                 continue
-            partners.sort(key=lambda item: (-item[0], -item[1], item[2]))
-            target = partners[0][3]
+            partners.sort(key=lambda item: (
+                -item[0], -item[1], -item[2], item[3]))
+            target = partners[0][4]
             scribe = self._get_or_create_officeholder(
                 target.id, year, "scribe")
             event = self._event_gen.generate_literary_spread_event(
@@ -1447,6 +1514,18 @@ class World:
 
     def _add_event_with_evidence(self, event: HistoricalEvent):
         """Add truth, perspective-bound records, and their physical carriers."""
+        transfer_effects = plan_supplemental_event_transfers(self, event)
+        if transfer_effects:
+            effect_ids = self._effect_resolver.apply_effects(
+                transfer_effects, self)
+            if effect_ids:
+                event.effect_ids.extend(effect_ids)
+                event.effects.extend(
+                    effect_to_dict(effect) for effect in transfer_effects)
+                self._record_effect_sources(event, transfer_effects)
+            else:
+                event.details.pop("object_transfers", None)
+        self._apply_event_person_movements(event)
         self._add_event(event)
         recipes = EVIDENCE_RECIPES.get(event.event_type, [])
         source_records = self._record_gen.create_records_for_event(
@@ -1465,6 +1544,48 @@ class World:
                     owner_person_id=(record.author_person_id if record else None))
             self._informant_mgr.distribute_carrier(
                 self, evd, record, event.year)
+
+    def _apply_event_person_movements(self, event: HistoricalEvent) -> None:
+        person_effects = plan_event_person_movements(self, event)
+        population_effects, population_details = \
+            plan_disaster_population_displacement(self, event)
+        knowledge_effects, knowledge_details = \
+            plan_event_knowledge_transfers(self, event, person_effects)
+        network_effects, network_details = plan_event_exchange_networks(
+            self, event, person_effects, knowledge_details)
+        effects = (
+            person_effects + population_effects
+            + knowledge_effects + network_effects)
+        if not effects:
+            event.details.pop("person_movements", None)
+            event.details.pop("population_displacement", None)
+            event.details.pop("knowledge_transfers", None)
+            event.details.pop("network_updates", None)
+            return
+        effect_ids = self._effect_resolver.apply_effects(effects, self)
+        if not effect_ids:
+            event.details.pop("person_movements", None)
+            event.details.pop("population_displacement", None)
+            event.details.pop("knowledge_transfers", None)
+            event.details.pop("network_updates", None)
+            return
+        event.effect_ids.extend(effect_ids)
+        event.effects.extend(effect_to_dict(effect) for effect in effects)
+        movements = describe_person_movements(self, person_effects)
+        if movements:
+            event.details["person_movements"] = movements
+            event.person_ids = list(dict.fromkeys([
+                *event.person_ids,
+                *(item["person_id"] for item in movements),
+            ]))
+        if population_details:
+            event.details["population_displacement"] = population_details
+        if knowledge_details:
+            event.details["knowledge_transfers"] = knowledge_details
+            self._record_effect_sources(event, knowledge_effects)
+        if network_details:
+            event.details["network_updates"] = network_details
+            self._record_effect_sources(event, network_effects)
 
     # ---- 证据衰减 ----
 
@@ -1564,7 +1685,7 @@ class World:
     def to_dict(self) -> dict:
         """序列化世界状态（不含 Geography numpy 数组，可从 seed 重现）。"""
         return {
-            "schema_version": 8,
+            "schema_version": 11,
             "seed": self.seed,
             "name": self.name,
             "current_year": self.current_year,
@@ -1609,10 +1730,14 @@ class World:
             s_data["id"]: Settlement.from_dict(s_data)
             for s_data in data.get("settlements", [])
         }
+        for settlement in w.settlements.values():
+            settlement.schema_version = 5
         w.persons = {
             person_data["id"]: Person.from_dict(person_data)
             for person_data in data.get("persons", [])
         }
+        for person in w.persons.values():
+            person.schema_version = 2
         w.informants = {
             item["id"]: Informant.from_dict(item)
             for item in data.get("informants", [])
@@ -1742,7 +1867,7 @@ class World:
             ])
         legacy_storage = "storage_sites" not in data
         for evidence in sorted(w.evidence.values(), key=lambda item: item.id):
-            evidence.schema_version = 6
+            evidence.schema_version = 7
             if (evidence.container_id in w.storage_sites
                     and evidence.holder_id in w.storage_sites):
                 continue
