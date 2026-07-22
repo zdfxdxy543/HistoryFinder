@@ -6,6 +6,50 @@ import hashlib
 from collections import deque
 
 
+DAYLIGHT_NAMES = {
+    "dawn": "黎明",
+    "day": "白昼",
+    "dusk": "黄昏",
+    "night": "夜晚",
+    "late_night": "深夜",
+}
+
+
+WEATHER_NAMES = {
+    "clear": "晴朗",
+    "cloudy": "多云",
+    "rain": "降雨",
+    "storm": "风暴",
+    "fog": "雾",
+    "snow": "降雪",
+    "dust": "扬尘",
+}
+
+
+WEATHER_BY_BIOME = {
+    "tundra": ("clear", "cloudy", "cloudy", "fog", "snow", "snow"),
+    "mountain": ("clear", "cloudy", "cloudy", "fog", "rain", "snow"),
+    "highland": ("clear", "clear", "cloudy", "fog", "rain", "storm"),
+    "desert": ("clear", "clear", "clear", "cloudy", "dust", "dust"),
+    "scrubland": ("clear", "clear", "cloudy", "rain", "dust"),
+    "forest": ("clear", "cloudy", "cloudy", "rain", "rain", "fog", "storm"),
+    "river_valley": ("clear", "cloudy", "rain", "rain", "fog", "storm"),
+    "grassland": ("clear", "clear", "cloudy", "rain", "storm", "fog"),
+    "plains": ("clear", "clear", "cloudy", "rain", "storm", "fog"),
+}
+
+
+WEATHER_VISIBILITY_PENALTY = {
+    "clear": 0,
+    "cloudy": 0,
+    "rain": 1,
+    "storm": 3,
+    "fog": 4,
+    "snow": 2,
+    "dust": 3,
+}
+
+
 ACTIVITY_NAMES = {
     "commuting": "正在上工",
     "working": "正在工作",
@@ -45,10 +89,14 @@ class LocalTimeSimulation:
 
     def __init__(self, local_map: dict, day: int = 1,
                  minute_of_day: int = 6 * 60 + 55,
-                 settle_npcs: bool = False):
+                 settle_npcs: bool = False, *, world_seed: int = 0,
+                 location_id: str = "local", biome: str = "plains"):
         self.local_map = local_map
         self.day = max(1, day)
         self.minute_of_day = minute_of_day % (24 * 60)
+        self.world_seed = world_seed
+        self.location_id = location_id
+        self.biome = biome
         self.turn = 0
         self.player = dict(local_map["player_start"])
         self._static_positions = {
@@ -58,6 +106,7 @@ class LocalTimeSimulation:
                 and item.get("blocks_movement", True))
         }
         self._reachable_cells = self._reachable_from_player_start()
+        self._explored_cells: set[tuple[int, int]] = set()
         self._npcs: dict[str, dict] = {}
         self._initialize_npcs()
         if settle_npcs:
@@ -90,6 +139,9 @@ class LocalTimeSimulation:
 
     def snapshot(self) -> dict:
         hour, minute = divmod(self.minute_of_day, 60)
+        environment = self._environment_snapshot()
+        visible_cells = self._visible_cells(environment["visibility_radius"])
+        self._explored_cells.update(visible_cells)
         return {
             "day": self.day,
             "minute_of_day": self.minute_of_day,
@@ -97,6 +149,9 @@ class LocalTimeSimulation:
             "period_name": self._period_name(hour),
             "turn": self.turn,
             "player": dict(self.player),
+            "environment": environment,
+            "visible_tiles": self._sorted_cells(visible_cells),
+            "explored_tiles": self._sorted_cells(self._explored_cells),
             "npcs": [
                 {
                     "id": npc["id"],
@@ -109,6 +164,103 @@ class LocalTimeSimulation:
                 for npc in sorted(self._npcs.values(), key=lambda item: item["id"])
             ],
         }
+
+    def _environment_snapshot(self) -> dict:
+        daylight, light_level, base_radius = self._daylight()
+        weather = self._weather()
+        radius = max(
+            2,
+            base_radius - WEATHER_VISIBILITY_PENALTY[weather],
+        )
+        return {
+            "daylight": daylight,
+            "daylight_name": DAYLIGHT_NAMES[daylight],
+            "light_level": light_level,
+            "weather": weather,
+            "weather_name": WEATHER_NAMES[weather],
+            "visibility_radius": radius,
+        }
+
+    def _daylight(self) -> tuple[str, float, int]:
+        minute = self.minute_of_day
+        if 5 * 60 <= minute < 7 * 60:
+            return "dawn", 0.58, 7
+        if 7 * 60 <= minute < 17 * 60:
+            return "day", 1.0, 10
+        if 17 * 60 <= minute < 19 * 60:
+            return "dusk", 0.52, 7
+        if 19 * 60 <= minute < 23 * 60:
+            return "night", 0.28, 5
+        return "late_night", 0.18, 4
+
+    def _weather(self) -> str:
+        choices = WEATHER_BY_BIOME.get(
+            self.biome,
+            ("clear", "clear", "cloudy", "rain", "fog", "storm"),
+        )
+        weather_block = self.minute_of_day // (3 * 60)
+        digest = hashlib.sha256(
+            f"weather|{self.world_seed}|{self.location_id}|"
+            f"{self.day}|{weather_block}".encode("utf-8")
+        ).digest()
+        return choices[int.from_bytes(digest[:4], "big") % len(choices)]
+
+    def _visible_cells(self, radius: int) -> set[tuple[int, int]]:
+        origin = (self.player["x"], self.player["y"])
+        visible = {origin}
+        width = self.local_map["width"]
+        height = self.local_map["height"]
+        for y in range(max(0, origin[1] - radius),
+                       min(height, origin[1] + radius + 1)):
+            for x in range(max(0, origin[0] - radius),
+                           min(width, origin[0] + radius + 1)):
+                if max(abs(x - origin[0]), abs(y - origin[1])) > radius:
+                    continue
+                target = (x, y)
+                if self._has_line_of_sight(origin, target):
+                    visible.add(target)
+        return visible
+
+    def _has_line_of_sight(self, origin: tuple[int, int],
+                           target: tuple[int, int]) -> bool:
+        line = self._grid_line(origin, target)
+        # The blocking tile can be seen; only cells behind it are hidden.
+        return not any(self._blocks_sight(cell) for cell in line[1:-1])
+
+    def _blocks_sight(self, position: tuple[int, int]) -> bool:
+        x, y = position
+        tile = self.local_map["tiles"][y * self.local_map["width"] + x]
+        return tile in self.local_map["blocking_tiles"]
+
+    @staticmethod
+    def _grid_line(origin: tuple[int, int],
+                   target: tuple[int, int]) -> list[tuple[int, int]]:
+        x0, y0 = origin
+        x1, y1 = target
+        dx = abs(x1 - x0)
+        dy = -abs(y1 - y0)
+        step_x = 1 if x0 < x1 else -1
+        step_y = 1 if y0 < y1 else -1
+        error = dx + dy
+        line = []
+        while True:
+            line.append((x0, y0))
+            if x0 == x1 and y0 == y1:
+                return line
+            doubled = 2 * error
+            if doubled >= dy:
+                error += dy
+                x0 += step_x
+            if doubled <= dx:
+                error += dx
+                y0 += step_y
+
+    @staticmethod
+    def _sorted_cells(cells: set[tuple[int, int]]) -> list[dict]:
+        return [
+            {"x": x, "y": y}
+            for x, y in sorted(cells, key=lambda item: (item[1], item[0]))
+        ]
 
     def _initialize_npcs(self) -> None:
         homes = self._home_positions()

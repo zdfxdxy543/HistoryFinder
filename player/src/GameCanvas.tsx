@@ -22,6 +22,14 @@ type Props = {
 
 type SceneCallbacks = Pick<Props, "onSelect" | "onNearby" | "onInteract" | "onMove">;
 
+type WeatherParticle = {
+  x: number;
+  y: number;
+  speed: number;
+  drift: number;
+  size: number;
+};
+
 class SettlementScene extends Phaser.Scene {
   private mapData: LocalMap;
   private callbacks: SceneCallbacks;
@@ -30,7 +38,12 @@ class SettlementScene extends Phaser.Scene {
   private moving = false;
   private markers = new Map<string, Phaser.GameObjects.Container>();
   private entityPositions = new Map<string, { x: number; y: number }>();
+  private initialRuntime: RuntimeState;
   private runtimeTurn: number;
+  private visibilityLayer?: Phaser.GameObjects.Graphics;
+  private weatherLayer?: Phaser.GameObjects.Graphics;
+  private weatherParticles: WeatherParticle[] = [];
+  private weather: RuntimeState["environment"]["weather"] = "clear";
   private selectedId: string | null = null;
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
   private keys?: Record<string, Phaser.Input.Keyboard.Key>;
@@ -39,6 +52,7 @@ class SettlementScene extends Phaser.Scene {
     super("settlement");
     this.mapData = map;
     this.callbacks = callbacks;
+    this.initialRuntime = runtime;
     this.playerGrid = { ...runtime.player };
     this.runtimeTurn = runtime.turn;
     map.entities.forEach((entity) => {
@@ -57,6 +71,9 @@ class SettlementScene extends Phaser.Scene {
       this.playerGrid.x * TILE_SIZE + TILE_SIZE / 2,
       this.playerGrid.y * TILE_SIZE + TILE_SIZE / 2,
     );
+    this.visibilityLayer = this.add.graphics().setDepth(20);
+    this.weatherLayer = this.add.graphics().setDepth(21);
+    this.renderEnvironment(this.initialRuntime);
     this.cameras.main.setBounds(
       0,
       0,
@@ -83,7 +100,8 @@ class SettlementScene extends Phaser.Scene {
     this.emitNearby();
   }
 
-  update() {
+  update(_time: number, delta: number) {
+    this.updateWeather(delta);
     if (this.moving || !this.cursors || !this.keys) return;
     const just = Phaser.Input.Keyboard.JustDown;
     if (just(this.cursors.left) || just(this.keys.A)) this.tryMove(-1, 0);
@@ -459,7 +477,7 @@ class SettlementScene extends Phaser.Scene {
   }
 
   private createPlayer(x: number, y: number) {
-    const container = this.add.container(x, y).setDepth(12);
+    const container = this.add.container(x, y).setDepth(22);
     const shadow = this.add.ellipse(0, 11, 22, 8, 0x111814, 0.35);
     const body = this.add.graphics();
     body.fillStyle(0xb6493f, 1);
@@ -540,6 +558,123 @@ class SettlementScene extends Phaser.Scene {
         ease: "Sine.easeInOut",
       });
     });
+    this.renderEnvironment(runtime);
+  }
+
+  private renderEnvironment(runtime: RuntimeState) {
+    if (!this.visibilityLayer) return;
+    const visible = new Set(
+      runtime.visible_tiles.map((tile) => `${tile.x},${tile.y}`),
+    );
+    const explored = new Set(
+      runtime.explored_tiles.map((tile) => `${tile.x},${tile.y}`),
+    );
+    const visibleDarkness = (1 - runtime.environment.light_level) * 0.42;
+    this.visibilityLayer.clear();
+    for (let y = 0; y < this.mapData.height; y += 1) {
+      for (let x = 0; x < this.mapData.width; x += 1) {
+        const key = `${x},${y}`;
+        if (visible.has(key)) {
+          if (visibleDarkness > 0) {
+            this.visibilityLayer.fillStyle(0x111c24, visibleDarkness);
+            this.visibilityLayer.fillRect(
+              x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE,
+            );
+          }
+          continue;
+        }
+        this.visibilityLayer.fillStyle(
+          explored.has(key) ? 0x111815 : 0x080c0a,
+          explored.has(key) ? 0.62 : 0.97,
+        );
+        this.visibilityLayer.fillRect(
+          x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE,
+        );
+      }
+    }
+    this.markers.forEach((marker, id) => {
+      const position = this.entityPositions.get(id);
+      marker.setVisible(Boolean(
+        position && visible.has(`${position.x},${position.y}`),
+      ));
+    });
+    if (this.weather !== runtime.environment.weather) {
+      this.weather = runtime.environment.weather;
+      this.resetWeatherParticles();
+    }
+  }
+
+  private resetWeatherParticles() {
+    const width = this.mapData.width * TILE_SIZE;
+    const height = this.mapData.height * TILE_SIZE;
+    if (["clear", "cloudy"].includes(this.weather)) {
+      this.weatherParticles = [];
+      this.weatherLayer?.clear();
+      return;
+    }
+    const density = this.weather === "fog" ? 15000 : 7000;
+    const count = Phaser.Math.Clamp(Math.round(width * height / density), 90, 480);
+    this.weatherParticles = Array.from({ length: count }, () => ({
+      x: Phaser.Math.Between(0, width),
+      y: Phaser.Math.Between(0, height),
+      speed: Phaser.Math.Between(35, this.weather === "storm" ? 280 : 150),
+      drift: Phaser.Math.Between(-18, 34),
+      size: Phaser.Math.FloatBetween(1, 3.2),
+    }));
+  }
+
+  private updateWeather(delta: number) {
+    if (!this.weatherLayer || this.weatherParticles.length === 0) return;
+    const width = this.mapData.width * TILE_SIZE;
+    const height = this.mapData.height * TILE_SIZE;
+    const elapsed = Math.min(delta, 50) / 1000;
+    this.weatherLayer.clear();
+    if (this.weather === "rain" || this.weather === "storm") {
+      this.weatherLayer.lineStyle(
+        this.weather === "storm" ? 1.5 : 1,
+        0xb8cad0,
+        this.weather === "storm" ? 0.52 : 0.34,
+      );
+    }
+    for (const particle of this.weatherParticles) {
+      if (this.weather === "fog") {
+        particle.x += particle.drift * elapsed;
+        if (particle.x > width + 100) particle.x = -100;
+        if (particle.x < -100) particle.x = width + 100;
+        this.weatherLayer.fillStyle(0xd8dfdc, 0.035);
+        this.weatherLayer.fillRect(
+          particle.x, particle.y, particle.size * 28, particle.size * 2.5,
+        );
+      } else if (this.weather === "snow") {
+        particle.y += particle.speed * 0.35 * elapsed;
+        particle.x += Math.sin(particle.y * 0.02) * 8 * elapsed;
+        if (particle.y > height) particle.y = 0;
+        this.weatherLayer.fillStyle(0xf0f3ee, 0.68);
+        this.weatherLayer.fillCircle(particle.x, particle.y, particle.size);
+      } else if (this.weather === "dust") {
+        particle.x += (particle.speed + 45) * elapsed;
+        particle.y += particle.drift * 0.18 * elapsed;
+        if (particle.x > width) particle.x = 0;
+        if (particle.y > height) particle.y = 0;
+        if (particle.y < 0) particle.y = height;
+        this.weatherLayer.lineStyle(1.2, 0xc2a56e, 0.28);
+        this.weatherLayer.lineBetween(
+          particle.x, particle.y, particle.x + particle.size * 6, particle.y + 1,
+        );
+      } else {
+        const storm = this.weather === "storm";
+        particle.y += particle.speed * elapsed;
+        particle.x += (storm ? 60 : 22) * elapsed;
+        if (particle.y > height) particle.y = 0;
+        if (particle.x > width) particle.x = 0;
+        this.weatherLayer.lineBetween(
+          particle.x,
+          particle.y,
+          particle.x + (storm ? 8 : 4),
+          particle.y + particle.size * (storm ? 9 : 6),
+        );
+      }
+    }
   }
 
   private emitNearby() {

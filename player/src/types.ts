@@ -91,6 +91,16 @@ export type RuntimeState = {
   period_name: string;
   turn: number;
   player: { x: number; y: number };
+  environment: {
+    daylight: "dawn" | "day" | "dusk" | "night" | "late_night";
+    daylight_name: string;
+    light_level: number;
+    weather: "clear" | "cloudy" | "rain" | "storm" | "fog" | "snow" | "dust";
+    weather_name: string;
+    visibility_radius: number;
+  };
+  visible_tiles: Array<{ x: number; y: number }>;
+  explored_tiles: Array<{ x: number; y: number }>;
   npcs: NpcRuntime[];
 };
 

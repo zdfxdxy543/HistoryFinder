@@ -73,6 +73,10 @@ button { color: inherit; }
 .clock-readout span { display: grid; line-height: 1.05; }
 .clock-readout strong { font-size: 13px; }
 .clock-readout small { margin-top: 3px; color: #b7c1ba; font-size: 9px; }
+.environment-readout { min-width: 112px; height: 36px; display: flex; align-items: center; gap: 7px; padding: 4px 8px; color: #f5f7f4; background: #303a33; border: 1px solid #56635a; }
+.environment-readout > span { min-width: 0; display: grid; line-height: 1.05; }
+.environment-readout strong { font-size: 12px; }
+.environment-readout small { display: flex; align-items: center; gap: 3px; margin-top: 3px; color: #b7c1ba; font-size: 9px; white-space: nowrap; }
 .world-settings label { display: grid; gap: 2px; color: #aeb9b1; font-size: 10px; }
 .world-settings input {
   width: 74px;
@@ -303,6 +307,8 @@ blockquote { margin: 8px 0; padding: 8px 11px; color: #39443d; background: #f0f3
   .view-switch button { padding: 3px; font-size: 0; }
   .clock-readout { min-width: 72px; width: 72px; gap: 4px; padding: 4px; }
   .clock-readout small { display: none; }
+  .environment-readout { min-width: 76px; width: 76px; gap: 4px; padding: 4px; }
+  .environment-readout small { display: none; }
   .world-settings { align-items: center; }
   .workspace { display: block; }
   .world-workspace { display: block; }
@@ -330,6 +336,16 @@ blockquote { margin: 8px 0; padding: 8px 11px; color: #39443d; background: #f0f3
 }
 
 @media (max-width: 420px) {
+  .topbar { grid-template-columns: minmax(76px, 1fr) 68px auto; gap: 4px; padding-left: 5px; padding-right: 5px; }
+  .brand { gap: 5px; }
+  .brand-mark { width: 30px; height: 30px; font-size: 12px; }
+  .brand h1 { font-size: 12px; }
+  .world-settings { gap: 4px; }
+  .clock-readout { min-width: 57px; width: 57px; }
+  .clock-readout strong { font-size: 11px; }
+  .environment-readout { min-width: 55px; width: 55px; }
+  .environment-readout strong { font-size: 10px; }
+  .world-settings .icon-command { width: 30px; height: 30px; min-height: 30px; }
   .scene-pane { min-height: 340px; }
   .map-key span { font-size: 9px; }
   .journal-tabs button { font-size: 10px; }

@@ -75,7 +75,12 @@ class PlayerSession:
         self.local_map = LocalMapBuilder().build(self.world, settlement)
         self._local_maps = {self.current_location_id: self.local_map}
         self._decorate_local_map_evidence()
-        self.local_time = LocalTimeSimulation(self.local_map)
+        self.local_time = LocalTimeSimulation(
+            self.local_map,
+            world_seed=self.world.seed,
+            location_id=settlement.id,
+            biome=str(settlement.biome),
+        )
 
     def bootstrap(self) -> dict:
         settlement = self.world.settlements[self.current_location_id]
@@ -396,6 +401,9 @@ class PlayerSession:
             day=day + 1,
             minute_of_day=minute_of_day,
             settle_npcs=True,
+            world_seed=self.world.seed,
+            location_id=destination.id,
+            biome=str(destination.biome),
         )
         self._sync_discovered_evidence()
         return {

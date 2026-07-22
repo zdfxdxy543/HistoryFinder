@@ -42,11 +42,36 @@ export default function LocalMiniMap({ map, runtime }: Props) {
       context.strokeRect(left, top, right - left + 1, bottom - top + 1);
     });
 
+    const visible = new Set(
+      runtime.visible_tiles.map((tile) => `${tile.x},${tile.y}`),
+    );
+    const explored = new Set(
+      runtime.explored_tiles.map((tile) => `${tile.x},${tile.y}`),
+    );
+    for (let y = 0; y < map.height; y += 1) {
+      for (let x = 0; x < map.width; x += 1) {
+        const key = `${x},${y}`;
+        if (visible.has(key)) {
+          const darkness = (1 - runtime.environment.light_level) * 0.34;
+          if (darkness > 0) {
+            context.fillStyle = `rgba(13, 23, 29, ${darkness})`;
+            context.fillRect(x, y, 1, 1);
+          }
+        } else {
+          context.fillStyle = explored.has(key)
+            ? "rgba(12, 18, 15, .58)"
+            : "rgba(7, 11, 9, .96)";
+          context.fillRect(x, y, 1, 1);
+        }
+      }
+    }
+
     const npcPositions = new Map(
       runtime.npcs.map((npc) => [npc.id, { x: npc.x, y: npc.y }]),
     );
     map.entities.forEach((entity) => {
       const position = npcPositions.get(entity.id) ?? entity;
+      if (!visible.has(`${position.x},${position.y}`)) return;
       context.fillStyle = entity.kind === "container"
         ? ["excavation", "debris_search"].includes(entity.placement_kind ?? "")
           ? "#a68b64" : "#e0b66e"

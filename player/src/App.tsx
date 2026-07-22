@@ -7,6 +7,11 @@ import {
   BookOpen,
   Boxes,
   Clock3,
+  Cloud,
+  CloudFog,
+  CloudLightning,
+  CloudRain,
+  Eye,
   FileText,
   Footprints,
   Globe2,
@@ -15,10 +20,14 @@ import {
   LoaderCircle,
   MessageSquareText,
   MapPinned,
+  Moon,
   RefreshCw,
   Scale,
   Search,
+  Snowflake,
+  Sun,
   Users,
+  Wind,
   X,
 } from "lucide-react";
 import { performAction, startSession } from "./api";
@@ -65,6 +74,16 @@ function value(item: Record<string, unknown>, key: string) {
 function list(item: Record<string, unknown>, key: string) {
   const result = item[key];
   return Array.isArray(result) ? result : [];
+}
+
+function EnvironmentGlyph({ weather }: { weather: RuntimeState["environment"]["weather"] }) {
+  if (weather === "cloudy") return <Cloud size={17} />;
+  if (weather === "rain") return <CloudRain size={17} />;
+  if (weather === "storm") return <CloudLightning size={17} />;
+  if (weather === "fog") return <CloudFog size={17} />;
+  if (weather === "snow") return <Snowflake size={17} />;
+  if (weather === "dust") return <Wind size={17} />;
+  return <Sun size={17} />;
 }
 
 export default function App() {
@@ -294,8 +313,22 @@ export default function App() {
         <div className="world-settings">
           {runtime && (
             <div className="clock-readout" title="本地时间">
-              <Clock3 size={17} />
+              {runtime.environment.daylight === "day"
+                || runtime.environment.daylight === "dawn"
+                ? <Clock3 size={17} /> : <Moon size={17} />}
               <span><strong>{runtime.time_label}</strong><small>第 {runtime.day} 日 · {runtime.period_name}</small></span>
+            </div>
+          )}
+          {runtime && (
+            <div
+              className="environment-readout"
+              title={`${runtime.environment.daylight_name}，${runtime.environment.weather_name}，可见 ${runtime.environment.visibility_radius} 格`}
+            >
+              <EnvironmentGlyph weather={runtime.environment.weather} />
+              <span>
+                <strong>{runtime.environment.weather_name}</strong>
+                <small><Eye size={10} /> {runtime.environment.daylight_name} · {runtime.environment.visibility_radius} 格</small>
+              </span>
             </div>
           )}
           <label>
