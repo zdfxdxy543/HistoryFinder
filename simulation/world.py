@@ -21,18 +21,22 @@ from simulation.polity import (
     Polity, PolityManager, SettlementControlPeriod,
 )
 from simulation.person import Person, PersonManager
+from simulation.religion import (
+    ReligionManager, ReligionTradition, primary_religion,
+)
 from simulation.informants import (
     Informant, InformantManager, KnowledgeEntry,
 )
 from simulation.events import HistoricalEvent, EventGenerator
 from simulation.evidence import (
-    EVIDENCE_RECIPES, Evidence, EvidenceGenerator,
+    EVIDENCE_RECIPES, RELIGIOUS_CONTENT_SUBTYPES, Evidence, EvidenceGenerator,
     tick_natural_decay, apply_event_destruction, apply_burial_preservation, get_climate_factor
 )
 from simulation.records import HistoricalRecord, RecordGenerator
 from simulation.storage import StorageManager, StorageSite
 from simulation.technology import TECHNOLOGY_CATALOG
 from simulation.research import generate_research_process
+from simulation.literary_generation import event_theme, role_theme
 from simulation.mobility import (
     describe_person_movements,
     plan_disaster_population_displacement,
@@ -58,6 +62,8 @@ from simulation.effects import (
     ModifyFoodStock,
     ModifyInfrastructure,
     ModifyCulturalInfluence,
+    ModifyReligiousPresence,
+    ModifyReligiousTolerance,
     ModifyLegitimacy,
     ModifyPopulation,
     ModifyRelationship,
@@ -69,6 +75,27 @@ from simulation.effects import (
     StrengthenExchangeNetwork,
     TransferControl,
     effect_to_dict,
+)
+from simulation.routes import (
+    ROAD_OVERGROWN_YEARS,
+    ROAD_RUINED_YEARS,
+    ROUTE_ABANDONMENT_YEARS,
+    TRADE_STALE_GRACE_YEARS,
+    RoadSegment,
+    RoutePlanner,
+    TradeRoute,
+    TravelGroup,
+    caravan_id,
+    road_segment_id,
+    route_id,
+    stable_route_int,
+    traveler_id,
+)
+from simulation.signposts import SignBoard, Signpost
+from simulation.historical_sites import (
+    BurialRecord,
+    HistoricalSite,
+    HistoricalSiteManager,
 )
 
 
@@ -106,6 +133,7 @@ HISTORY_THEME_BY_EVENT = {
     "population_milestone": "城镇发展",
 }
 
+
 BIOGRAPHY_THEME_BY_ROLE = {
     "founder": "建城",
     "ruler": "执政",
@@ -124,7 +152,7 @@ THEORETICAL_TITLES = {
     "astronomy": ["行星周期表解", "影长与季节论", "星位观测法"],
 }
 
-WORLD_SCHEMA_VERSION = 12
+WORLD_SCHEMA_VERSION = 18
 
 @dataclass
 class World:
@@ -145,6 +173,13 @@ class World:
     informants: dict[str, Informant] = field(default_factory=dict)
     knowledge_entries: dict[str, KnowledgeEntry] = field(default_factory=dict)
     storage_sites: dict[str, StorageSite] = field(default_factory=dict)
+    trade_routes: dict[str, TradeRoute] = field(default_factory=dict)
+    road_segments: dict[str, RoadSegment] = field(default_factory=dict)
+    travel_groups: dict[str, TravelGroup] = field(default_factory=dict)
+    signposts: dict[str, Signpost] = field(default_factory=dict)
+    religions: dict[str, ReligionTradition] = field(default_factory=dict)
+    historical_sites: dict[str, HistoricalSite] = field(default_factory=dict)
+    burials: dict[str, BurialRecord] = field(default_factory=dict)
     event_history_by_settlement: dict[str, list[str]] = field(default_factory=dict)
 
     _settlement_mgr: Optional[SettlementManager] = None
@@ -156,6 +191,8 @@ class World:
     _informant_mgr: Optional[InformantManager] = None
     _storage_mgr: Optional[StorageManager] = None
     _founding_planner: Optional[SettlementFoundingPlanner] = None
+    _religion_mgr: Optional[ReligionManager] = None
+    _historical_site_mgr: Optional[HistoricalSiteManager] = None
 
     # 追踪状态
     _last_ruler_change: dict[str, int] = field(default_factory=dict)
@@ -197,6 +234,10 @@ class World:
             self._last_ruler_change[stl.id] = 0
             self._pop_milestones[stl.id] = 500
 
+            tradition = self._religion_mgr.create_origin(stl, 0)
+            stl.religious_presence[tradition.id] = 1.0
+            stl.official_religion_id = tradition.id
+
             ruler = self._create_initial_ruler_and_heir(stl, 0)
             polity = self._polity_mgr.create_polity(stl.id, ruler.id, 0)
             self.polities[polity.id] = polity
@@ -217,6 +258,7 @@ class World:
             self._tick_year(year, rng)
 
         self.current_year = years
+        self._sync_historical_sites()
 
     def _initialize_runtime_managers(self) -> None:
         self._settlement_mgr = SettlementManager(self.seed)
@@ -229,8 +271,487 @@ class World:
             self.seed, self.informants, self.knowledge_entries)
         self._storage_mgr = StorageManager(self.seed, self.storage_sites)
         self._founding_planner = SettlementFoundingPlanner()
+        self._religion_mgr = ReligionManager(self.seed, self.religions)
+        self._historical_site_mgr = HistoricalSiteManager(
+            self.seed, self.historical_sites, self.burials)
         self._rule_registry = EventRuleRegistry()
         self._effect_resolver = EffectResolver(self.seed)
+
+    def get_settlement_at(self, x: int, y: int) -> Settlement | None:
+        return next((
+            settlement for settlement in self.settlements.values()
+            if int(settlement.grid_x) == x and int(settlement.grid_y) == y
+        ), None)
+
+    def get_historical_sites_at(self, x: int, y: int) -> list[HistoricalSite]:
+        return sorted((
+            site for site in self.historical_sites.values()
+            if (x, y) in site.occupied_cells
+        ), key=lambda site: site.id)
+
+    def get_burials_at_site(self, site_id: str) -> list[BurialRecord]:
+        return sorted((
+            burial for burial in self.burials.values()
+            if burial.site_id == site_id
+        ), key=lambda burial: (burial.burial_year, burial.id))
+
+    def get_signposts_at(self, x: int, y: int) -> list[Signpost]:
+        return sorted((
+            signpost for signpost in self.signposts.values()
+            if signpost.world_cell == (x, y)
+        ), key=lambda signpost: signpost.id)
+
+    def get_road_segments_at(self, x: int, y: int) -> list[RoadSegment]:
+        cell = (x, y)
+        return sorted((
+            segment for segment in self.road_segments.values()
+            if cell in {segment.cell_a, segment.cell_b}
+        ), key=lambda segment: segment.id)
+
+    def ensure_trade_route(self, settlement_a_id: str,
+                           settlement_b_id: str,
+                           event_id: str = "") -> TradeRoute | None:
+        key = route_id(settlement_a_id, settlement_b_id)
+        first = self.settlements.get(settlement_a_id)
+        second = self.settlements.get(settlement_b_id)
+        if (first is None or second is None or not first.alive or not second.alive
+                or self.geography is None):
+            return None
+        existing = self.trade_routes.get(key)
+        if existing is not None:
+            if existing.status != "active":
+                existing.status = "active"
+                existing.closed_year = None
+                existing.closure_reason = ""
+                existing.last_active_year = self.current_year
+                existing.revision += 1
+                self._set_route_site_state(existing)
+                for signpost in self.signposts.values():
+                    if existing.id in signpost.route_ids:
+                        signpost.abandoned_year = None
+                        signpost.condition = "weathered"
+                        signpost.revision += 1
+            self._attach_route_segments(existing)
+            self._ensure_route_signposts(existing)
+            self._ensure_route_caravan(existing)
+            self._ensure_route_travelers(existing)
+            return existing
+        path = RoutePlanner().plan(
+            self,
+            (int(first.grid_x), int(first.grid_y)),
+            (int(second.grid_x), int(second.grid_y)),
+        )
+        if not path:
+            return None
+        route = TradeRoute(
+            id=key,
+            settlement_a_id=settlement_a_id,
+            settlement_b_id=settlement_b_id,
+            opened_year=self.current_year,
+            opened_event_id=event_id,
+            path=path,
+        )
+        self.trade_routes[key] = route
+        self._attach_route_segments(route)
+        self._ensure_route_signposts(route)
+        self._ensure_route_caravan(route)
+        self._ensure_route_travelers(route)
+        return route
+
+    def _attach_route_segments(self, route: TradeRoute) -> None:
+        segment_ids = []
+        for first, second in zip(route.path, route.path[1:]):
+            segment_id = road_segment_id(first, second)
+            segment = self.road_segments.get(segment_id)
+            if segment is None:
+                low, high = sorted((first, second))
+                segment = RoadSegment(
+                    id=segment_id,
+                    cell_a=low,
+                    cell_b=high,
+                    built_year=route.opened_year,
+                    last_used_year=route.last_active_year or route.opened_year,
+                    status=("active" if route.status == "active"
+                            else "disused"),
+                    condition=1.0 if route.status == "active" else 0.55,
+                )
+                self.road_segments[segment_id] = segment
+            segment.attach_route(
+                route.id, self.current_year, active=route.status == "active")
+            segment_ids.append(segment_id)
+        if route.segment_ids != segment_ids:
+            route.segment_ids = segment_ids
+            route.revision += 1
+
+    def _ensure_route_signposts(self, route: TradeRoute) -> None:
+        if len(route.path) < 3:
+            return
+        selected = {1, len(route.path) - 2}
+        selected.update(range(6, len(route.path) - 1, 6))
+        other_route_cells = {
+            cell for item in self.trade_routes.values()
+            if item.id != route.id and item.status == "active"
+            for cell in item.path
+        }
+        last_turn = -3
+        for index in range(1, len(route.path) - 1):
+            previous = route.path[index - 1]
+            current = route.path[index]
+            following = route.path[index + 1]
+            before = (current[0] - previous[0], current[1] - previous[1])
+            after = (following[0] - current[0], following[1] - current[1])
+            if before != after and index - last_turn >= 3:
+                selected.add(index)
+                last_turn = index
+            if current in other_route_cells:
+                selected.add(index)
+
+        first = self.settlements.get(route.settlement_a_id)
+        second = self.settlements.get(route.settlement_b_id)
+        if first is None or second is None:
+            return
+        for index in sorted(selected):
+            cell = route.path[index]
+            if self.get_settlement_at(*cell) is not None:
+                continue
+            signpost_id = f"signpost_{cell[0]}_{cell[1]}"
+            builder = first if index <= len(route.path) // 2 else second
+            boards = [
+                SignBoard(
+                    id=f"{signpost_id}_{route.id}_{first.id}",
+                    destination_id=first.id,
+                    displayed_name=first.name,
+                    displayed_distance=str(index),
+                    direction=self._route_direction(cell, route.path[index - 1]),
+                    written_year=route.opened_year,
+                    writer_person_id=builder.ruler_id or "",
+                    source_route_id=route.id,
+                ),
+                SignBoard(
+                    id=f"{signpost_id}_{route.id}_{second.id}",
+                    destination_id=second.id,
+                    displayed_name=second.name,
+                    displayed_distance=str(len(route.path) - index - 1),
+                    direction=self._route_direction(cell, route.path[index + 1]),
+                    written_year=route.opened_year,
+                    writer_person_id=builder.ruler_id or "",
+                    source_route_id=route.id,
+                ),
+            ]
+            signpost = self.signposts.get(signpost_id)
+            if signpost is None:
+                signpost = Signpost(
+                    id=signpost_id,
+                    world_cell=cell,
+                    built_year=route.opened_year,
+                    builder_settlement_id=builder.id,
+                )
+                self.signposts[signpost_id] = signpost
+            signpost.add_boards(route.id, boards)
+
+    @staticmethod
+    def _route_direction(current: tuple[int, int],
+                         target: tuple[int, int]) -> str:
+        dx, dy = target[0] - current[0], target[1] - current[1]
+        return {
+            (0, -1): "north", (1, 0): "east",
+            (0, 1): "south", (-1, 0): "west",
+        }[(dx, dy)]
+
+    def _ensure_route_caravan(self, route: TradeRoute) -> TravelGroup:
+        if route.status != "active":
+            raise ValueError(f"cannot create caravan for {route.status} route")
+        key = caravan_id(route.id)
+        existing = self.travel_groups.get(key)
+        if existing is not None:
+            return existing
+        first = self.settlements[route.settlement_a_id]
+        second = self.settlements[route.settlement_b_id]
+        cargo_options = (
+            "谷物与干粮", "织物与染料", "陶器与生活器具",
+            "金属工具", "药草与香料", "书写材料",
+        )
+        cargo_seed = stable_route_int(str(self.seed), route.id, "cargo")
+        cargo = [
+            cargo_options[cargo_seed % len(cargo_options)],
+            cargo_options[(cargo_seed // 7 + 2) % len(cargo_options)],
+        ]
+        initial_index = (
+            stable_route_int(str(self.seed), route.id, "position")
+            % max(1, len(route.path))
+        )
+        group = TravelGroup(
+            id=key,
+            route_id=route.id,
+            origin_settlement_id=first.id,
+            destination_settlement_id=second.id,
+            path_index=initial_index,
+            cargo=list(dict.fromkeys(cargo)),
+            guard_count=1 + stable_route_int(
+                str(self.seed), route.id, "guards") % 4,
+        )
+        self.travel_groups[key] = group
+        return group
+
+    def _ensure_route_travelers(self, route: TradeRoute) -> list[TravelGroup]:
+        if route.status != "active":
+            return []
+        first = self.settlements[route.settlement_a_id]
+        second = self.settlements[route.settlement_b_id]
+        other_roles = ("traveler", "courier", "peddler")
+        roles = (
+            "pilgrim",
+            other_roles[stable_route_int(
+                str(self.seed), route.id, "traveler-role") % len(other_roles)],
+        )
+        result = []
+        for index, role in enumerate(roles):
+            key = traveler_id(route.id, index)
+            existing = self.travel_groups.get(key)
+            if existing is not None:
+                result.append(existing)
+                continue
+            position_seed = stable_route_int(
+                str(self.seed), route.id, "traveler-position", str(index))
+            if len(route.path) > 2:
+                initial_index = 1 + position_seed % (len(route.path) - 2)
+            else:
+                initial_index = position_seed % max(1, len(route.path))
+            direction = 1 if position_seed % 2 == 0 else -1
+            origin = first if direction > 0 else second
+            destination = second if direction > 0 else first
+            group = TravelGroup(
+                id=key,
+                route_id=route.id,
+                origin_settlement_id=origin.id,
+                destination_settlement_id=destination.id,
+                path_index=initial_index,
+                direction=direction,
+                progress_minutes=stable_route_int(
+                    str(self.seed), route.id, "traveler-progress", str(index)
+                ) % 180,
+                guard_count=0,
+                group_type="traveler",
+                traveler_role=role,
+                dialogue_variant=stable_route_int(
+                    str(self.seed), route.id, "traveler-dialogue", str(index)
+                ) % 3,
+            )
+            self.travel_groups[key] = group
+            result.append(group)
+        return result
+
+    def remove_trade_route(self, route_key: str,
+                           preserve_signposts: bool = True) -> None:
+        route = self.trade_routes.get(route_key)
+        if route is None:
+            return
+        if preserve_signposts:
+            self._abandon_trade_route(route, "trade_ended")
+            return
+        self.trade_routes.pop(route_key, None)
+        for group_id in [
+                item.id for item in self.travel_groups.values()
+                if item.route_id == route_key]:
+            self.travel_groups.pop(group_id, None)
+        for segment_id in route.segment_ids:
+            segment = self.road_segments.get(segment_id)
+            if segment is None or route_key not in segment.route_ids:
+                continue
+            segment.route_ids.remove(route_key)
+            if not segment.route_ids:
+                self.road_segments.pop(segment_id, None)
+            else:
+                segment.revision += 1
+        for signpost_id, signpost in list(self.signposts.items()):
+            if route_key not in signpost.route_ids:
+                continue
+            if not preserve_signposts:
+                signpost.route_ids.remove(route_key)
+                signpost.original_boards = [
+                    item for item in signpost.original_boards
+                    if item.source_route_id != route_key]
+                signpost.current_boards = [
+                    item for item in signpost.current_boards
+                    if item.source_route_id != route_key]
+                if not signpost.route_ids:
+                    self.signposts.pop(signpost_id, None)
+                else:
+                    signpost.revision += 1
+                continue
+
+    def _abandon_trade_route(self, route: TradeRoute, reason: str) -> None:
+        if route.status == "abandoned":
+            return
+        route.status = "abandoned"
+        route.closed_year = self.current_year
+        route.closure_reason = reason
+        route.revision += 1
+        self._set_route_site_state(route)
+        for group_id in [
+                item.id for item in self.travel_groups.values()
+                if item.route_id == route.id]:
+            self.travel_groups.pop(group_id, None)
+        for segment_id in route.segment_ids:
+            segment = self.road_segments.get(segment_id)
+            if segment is None:
+                continue
+            has_active_route = any(
+                route_id in self.trade_routes
+                and self.trade_routes[route_id].status == "active"
+                for route_id in segment.route_ids)
+            if not has_active_route and segment.status == "active":
+                segment.status = "disused"
+                segment.traffic_volume = 0.0
+                segment.revision += 1
+        for signpost in self.signposts.values():
+            if route.id not in signpost.route_ids:
+                continue
+            has_active_route = any(
+                route_id in self.trade_routes
+                and self.trade_routes[route_id].status == "active"
+                for route_id in signpost.route_ids)
+            if not has_active_route:
+                signpost.abandoned_year = self.current_year
+                signpost.condition = "abandoned"
+                signpost.revision += 1
+
+    def _set_route_site_state(self, route: TradeRoute) -> None:
+        for site in self.historical_sites.values():
+            if site.route_id != route.id:
+                continue
+            expected = "active" if route.status == "active" else "abandoned"
+            abandoned_year = None if route.status == "active" else route.closed_year
+            if (site.state == expected
+                    and site.abandoned_year == abandoned_year):
+                continue
+            site.state = expected
+            site.abandoned_year = abandoned_year
+            site.condition = 0.9 if route.status == "active" else 0.42
+            site.revision += 1
+
+    def _route_trade_volume(self, route: TradeRoute) -> float:
+        first = self.settlements.get(route.settlement_a_id)
+        second = self.settlements.get(route.settlement_b_id)
+        if first is None or second is None:
+            return 0.0
+        values = []
+        first_relationship = first.relationships.get(second.id)
+        second_relationship = second.relationships.get(first.id)
+        if first_relationship is not None:
+            values.append(first_relationship.trade_volume)
+        if second_relationship is not None:
+            values.append(second_relationship.trade_volume)
+        return sum(values) / len(values) if values else 0.0
+
+    def _decay_stale_route_trade(self, route: TradeRoute, year: int) -> None:
+        first = self.settlements.get(route.settlement_a_id)
+        second = self.settlements.get(route.settlement_b_id)
+        if first is None or second is None:
+            return
+        relationships = [
+            relationship for relationship in (
+                first.relationships.get(second.id),
+                second.relationships.get(first.id),
+            ) if relationship is not None
+        ]
+        if not relationships:
+            return
+        last_interaction = max(
+            relationship.last_interaction_year
+            for relationship in relationships)
+        if year - last_interaction <= TRADE_STALE_GRACE_YEARS:
+            return
+        trust = sum(item.trust for item in relationships) / len(relationships)
+        hostility = sum(
+            item.hostility for item in relationships) / len(relationships)
+        rate = 0.06 + hostility * 0.12 - trust * 0.03
+        rate = max(0.025, min(0.2, rate))
+        for relationship in relationships:
+            if relationship.trade_volume <= 0.0:
+                continue
+            decay = max(1.0, relationship.trade_volume * rate)
+            relationship.trade_volume = max(
+                0.0, relationship.trade_volume - decay)
+
+    def _tick_trade_routes(self, year: int) -> None:
+        for route in sorted(self.trade_routes.values(), key=lambda item: item.id):
+            if route.status != "active":
+                continue
+            first = self.settlements.get(route.settlement_a_id)
+            second = self.settlements.get(route.settlement_b_id)
+            if first is None or second is None or not first.alive or not second.alive:
+                self._abandon_trade_route(route, "endpoint_destroyed")
+                continue
+            self._decay_stale_route_trade(route, year)
+            volume = self._route_trade_volume(route)
+            if volume > 0.0:
+                route.last_active_year = year
+            elif year - (route.last_active_year or route.opened_year) \
+                    >= ROUTE_ABANDONMENT_YEARS:
+                self._abandon_trade_route(route, "trade_inactive")
+
+        for segment in self.road_segments.values():
+            active_routes = [
+                self.trade_routes[route_id]
+                for route_id in segment.route_ids
+                if route_id in self.trade_routes
+                and self.trade_routes[route_id].status == "active"
+            ]
+            old_state = (segment.status, segment.condition,
+                         segment.last_used_year, segment.traffic_volume)
+            if active_routes:
+                segment.status = "active"
+                segment.last_used_year = year
+                segment.traffic_volume = sum(
+                    self._route_trade_volume(route) for route in active_routes)
+                segment.condition = min(1.0, segment.condition + 0.04)
+            else:
+                unused_years = year - segment.last_used_year
+                segment.traffic_volume = 0.0
+                if unused_years >= ROAD_RUINED_YEARS:
+                    segment.status = "ruined"
+                    segment.condition = max(0.08, segment.condition - 0.08)
+                elif unused_years >= ROAD_OVERGROWN_YEARS:
+                    segment.status = "overgrown"
+                    segment.condition = max(0.28, segment.condition - 0.04)
+                else:
+                    segment.status = "disused"
+                    segment.condition = max(0.5, segment.condition - 0.02)
+            if old_state != (segment.status, segment.condition,
+                             segment.last_used_year, segment.traffic_volume):
+                segment.revision += 1
+
+    def repair_signpost(self, signpost_id: str, board_id: str,
+                        repairer_person_id: str, event_id: str = "",
+                        repair_type: str | None = None,
+                        error_type: str | None = None):
+        if repairer_person_id not in self.persons:
+            raise ValueError(f"unknown signpost repairer: {repairer_person_id}")
+        signpost = self.signposts[signpost_id]
+        return signpost.repair(
+            board_id, self.current_year, repairer_person_id, self.seed,
+            event_id=event_id, repair_type=repair_type,
+            error_type=error_type)
+
+    def _tick_signposts(self, year: int) -> None:
+        for signpost in self.signposts.values():
+            signpost.weather_to(year, self.seed)
+
+    def advance_travel_groups(self, minutes: int) -> None:
+        for group in sorted(
+                self.travel_groups.values(), key=lambda item: item.id):
+            route = self.trade_routes.get(group.route_id)
+            if route is not None:
+                group.advance(minutes, route)
+
+    def get_travel_groups_at(self, x: int, y: int) -> list[TravelGroup]:
+        result = []
+        for group in self.travel_groups.values():
+            route = self.trade_routes.get(group.route_id)
+            if route is not None and group.current_cell(route) == (x, y):
+                result.append(group)
+        return sorted(result, key=lambda item: item.id)
 
     def get_current_control_period(
             self, settlement_id: str) -> SettlementControlPeriod | None:
@@ -261,6 +782,7 @@ class World:
         # Phase B2: notable-person mortality and political succession.
         self._tick_person_mobility(year)
         self._tick_people(year)
+        self._tick_religious_exchange(year)
         self._informant_mgr.ensure_all_roles(self, year)
 
         # Phase C: 计算压力
@@ -280,6 +802,8 @@ class World:
 
         # Phase H: 证据衰减
         self._tick_evidence_decay(year, rng)
+        self._tick_trade_routes(year)
+        self._tick_signposts(year)
 
         # Event-linked travel can temporarily empty a local office after the
         # early-year staffing pass. Appoint an acting holder before year end.
@@ -288,6 +812,51 @@ class World:
     def get_pressure(self, settlement_id: str, pressure_name: str) -> float:
         """获取某个聚落的某个压力指标值。"""
         return self._pressures_cache.get(settlement_id, {}).get(pressure_name, 0.0)
+
+    def _tick_religious_exchange(self, year: int) -> None:
+        """Diffuse traditions gradually through established exchange ties."""
+        snapshots = {
+            settlement.id: dict(settlement.religious_presence)
+            for settlement in self.settlements.values() if settlement.alive
+        }
+        additions: dict[tuple[str, str], float] = {}
+        for target in sorted(
+                self.settlements.values(), key=lambda item: item.id):
+            if not target.alive:
+                continue
+            for source_id, relationship in sorted(target.relationships.items()):
+                source = self.settlements.get(source_id)
+                if source is None or not source.alive:
+                    continue
+                cultural = relationship.exchange_strengths.get("cultural", 0.0)
+                trade = relationship.exchange_strengths.get("trade", 0.0)
+                contact = cultural + trade * 0.35
+                if contact < 0.20:
+                    continue
+                source_presence = snapshots.get(source.id, {})
+                if not source_presence:
+                    continue
+                religion_id = max(
+                    source_presence,
+                    key=lambda key: (source_presence[key], key))
+                if religion_id == target.official_religion_id:
+                    continue
+                current = snapshots.get(target.id, {}).get(religion_id, 0.0)
+                if current >= 0.45:
+                    continue
+                cadence = int.from_bytes(hashlib.sha256(
+                    f"religion-spread|{self.seed}|{target.id}|{source.id}|{year}"
+                    .encode("utf-8")).digest()[:4], "big")
+                if cadence % 3:
+                    continue
+                additions[(target.id, religion_id)] = min(
+                    0.025, 0.004 + contact * 0.003)
+        for (settlement_id, religion_id), delta in additions.items():
+            settlement = self.settlements[settlement_id]
+            settlement.religious_presence[religion_id] = min(
+                1.0,
+                settlement.religious_presence.get(religion_id, 0.0) + delta,
+            )
 
     def _evaluate_natural_founding(self, year: int) -> list[str]:
         sources = [
@@ -496,6 +1065,211 @@ class World:
             for settlement in controlled:
                 self._apply_succession(settlement, ruler, successor, year)
             self._ensure_heir(successor, year)
+
+    def _sync_historical_sites(self) -> None:
+        if self._historical_site_mgr is None:
+            self._historical_site_mgr = HistoricalSiteManager(
+                self.seed, self.historical_sites, self.burials)
+        new_burials = self._historical_site_mgr.sync(self)
+        for site in self.historical_sites.values():
+            cell_id = f"{site.anchor_cell[0]},{site.anchor_cell[1]}"
+            settlement = self.settlements.get(site.owner_settlement_id)
+            settlement_cell = (
+                (int(settlement.grid_x), int(settlement.grid_y))
+                if settlement is not None else None)
+            field_storage = (
+                self._historical_site_storage(site, cell_id)
+                if site.anchor_cell != settlement_cell else None)
+            if site.site_type in {"cemetery", "abandoned_cemetery"}:
+                continue
+            for evidence in self.evidence.values():
+                if (evidence.event_id not in site.source_event_ids
+                        or evidence.location_type != "near_settlement"):
+                    continue
+                if field_storage is not None:
+                    self._storage_mgr.move_evidence(
+                        evidence, field_storage, self.current_year,
+                        "historical_site_relocation",
+                        event_id=(site.source_event_ids[-1]
+                                  if site.source_event_ids else None),
+                        transfer_type="site_relocation",
+                    )
+                evidence.location_type = "grid_cell"
+                evidence.location_id = cell_id
+                evidence.storage_position = "历史地点现场"
+                if evidence.id not in site.evidence_ids:
+                    site.evidence_ids.append(evidence.id)
+                    site.revision += 1
+            if field_storage is not None:
+                self._ensure_historical_site_evidence(
+                    site, field_storage, cell_id)
+        for burial in new_burials:
+            person = self.persons.get(burial.person_id)
+            site = self.historical_sites.get(burial.site_id)
+            settlement = (
+                self.settlements.get(site.owner_settlement_id)
+                if site is not None else None)
+            if person is None or site is None or settlement is None:
+                continue
+            existing_tomb = next((
+                evidence for evidence in self.evidence.values()
+                if evidence.subtype == "ruler_tomb"
+                and self.get_event(evidence.event_id) is not None
+                and self.get_event(evidence.event_id).details.get(
+                    "epitaph_subject_id") == person.id
+            ), None)
+            if existing_tomb is not None:
+                burial.inscription_evidence_id = existing_tomb.id
+                self._place_burial_marker(existing_tomb, site, settlement)
+                if existing_tomb.id not in site.evidence_ids:
+                    site.evidence_ids.append(existing_tomb.id)
+                    site.revision += 1
+                continue
+            commissioner = self.persons.get(burial.commissioner_person_id)
+            religion = self.religions.get(burial.religion_id)
+            life_sources = [
+                self._snapshot_history_event(event, person.id)
+                for event_id in burial.source_event_ids
+                if (event := self.get_event(event_id)) is not None
+            ]
+            event = self._event_gen.generate_burial_event(
+                burial.burial_year, settlement.id, settlement.name,
+                person, burial,
+                commissioner.name if commissioner is not None else "",
+                religion.text_profile() if religion is not None else {},
+                life_sources,
+            )
+            self._add_event_with_evidence(event)
+            marker = next((
+                evidence for evidence in self.get_evidence_by_event(event.id)
+                if evidence.subtype == "grave_marker"
+            ), None)
+            if marker is not None:
+                climate = get_climate_factor(str(settlement.biome))
+                elapsed = max(0, self.current_year - burial.burial_year)
+                if site.state in {"abandoned", "ruined"}:
+                    elapsed += 8
+                for age_year in range(elapsed):
+                    if marker.state == "destroyed":
+                        break
+                    tick_natural_decay(
+                        marker, climate,
+                        random.Random(
+                            f"burial-decay|{self.seed}|{marker.id}|{age_year}"),
+                    )
+                burial.inscription_evidence_id = marker.id
+                self._place_burial_marker(marker, site, settlement)
+                marker.content_data["burial_id"] = burial.id
+                marker.content_data["person_id"] = person.id
+                if marker.id not in site.evidence_ids:
+                    site.evidence_ids.append(marker.id)
+                    site.revision += 1
+        # Keep existing markers aligned if a previously empty cemetery was
+        # assigned to a wilderness cell during this synchronization.
+        for burial in self.burials.values():
+            marker = self.evidence.get(burial.inscription_evidence_id)
+            site = self.historical_sites.get(burial.site_id)
+            settlement = (
+                self.settlements.get(site.owner_settlement_id)
+                if site is not None else None)
+            if marker is not None and site is not None and settlement is not None:
+                self._place_burial_marker(marker, site, settlement)
+
+    def _historical_site_storage(
+            self, site: HistoricalSite, cell_id: str) -> StorageSite:
+        storage_id = f"storage_{site.id}"
+        storage = self.storage_sites.get(storage_id)
+        if storage is None:
+            storage = StorageSite(
+                id=storage_id,
+                settlement_id=cell_id,
+                site_type="field_site",
+                name=f"{site.name}现场",
+                accessibility="public",
+                preservation_modifier=1.45,
+                security=0.1,
+                condition=site.condition,
+                created_year=site.founded_year,
+                alive=True,
+            )
+            self.storage_sites[storage.id] = storage
+        else:
+            storage.settlement_id = cell_id
+            storage.name = f"{site.name}现场"
+            storage.condition = site.condition
+        return storage
+
+    def _ensure_historical_site_evidence(
+            self, site: HistoricalSite, storage: StorageSite,
+            cell_id: str) -> None:
+        remaining = max(0, 3 - len(site.evidence_ids))
+        if remaining == 0:
+            return
+        existing_subtypes = {
+            evidence.subtype
+            for evidence_id in site.evidence_ids
+            if (evidence := self.evidence.get(evidence_id)) is not None
+        }
+        candidates = []
+        for event_id in site.source_event_ids:
+            event = self.get_event(event_id)
+            if event is None:
+                continue
+            recipes = [
+                dict(recipe, copies=0)
+                for recipe in EVIDENCE_RECIPES.get(event.event_type, [])
+                if recipe["type"] != "oral"
+                and recipe["subtype"] not in existing_subtypes
+            ]
+            recipes.sort(key=lambda recipe: (
+                recipe["type"] == "document", recipe["subtype"]))
+            for recipe in recipes:
+                candidates.append((event, recipe))
+                existing_subtypes.add(recipe["subtype"])
+        for event, recipe in candidates[:remaining]:
+            source_records = self._record_gen.create_records_for_event(
+                event, [recipe], self.settlements, self.persons)
+            for versions in source_records.values():
+                for record in versions:
+                    self.records[record.id] = record
+            generated = self._evidence_gen.create_evidence_for_event(
+                event, source_records, [recipe])
+            if not generated:
+                continue
+            evidence = generated[0]
+            evidence.content_data["historical_site_id"] = site.id
+            evidence.location_type = "grid_cell"
+            self.evidence[evidence.id] = evidence
+            self._storage_mgr.move_evidence(
+                evidence, storage, self.current_year,
+                "historical_site_deposit",
+                event_id=event.id,
+                transfer_type="site_deposit",
+            )
+            evidence.location_id = cell_id
+            if evidence.id not in site.evidence_ids:
+                site.evidence_ids.append(evidence.id)
+                site.revision += 1
+
+    def _place_burial_marker(self, evidence: Evidence, site: HistoricalSite,
+                             settlement: Settlement) -> None:
+        settlement_cell = (
+            int(settlement.grid_x), int(settlement.grid_y))
+        if site.anchor_cell == settlement_cell:
+            evidence.location_type = "settlement"
+            evidence.location_id = settlement.id
+            return
+        evidence.location_type = "grid_cell"
+        cell_id = f"{site.anchor_cell[0]},{site.anchor_cell[1]}"
+        storage = self._historical_site_storage(site, cell_id)
+        self._storage_mgr.move_evidence(
+            evidence, storage, self.current_year,
+            "burial_marker_placed",
+            event_id=evidence.event_id,
+            transfer_type="burial",
+        )
+        evidence.location_id = cell_id
+        evidence.storage_position = "墓园原位置"
 
     def _select_successor(self, ruler: Person, year: int) -> Person:
         living = [
@@ -777,6 +1551,7 @@ class World:
             event.details.update({
                 "author_id": author.id,
                 "author_name": author.name,
+                "author_roles": list(author.roles),
                 "genre": genre,
                 "genre_name": genre_name,
                 "work_title": work_title,
@@ -785,6 +1560,19 @@ class World:
                     source["event_id"] for source in literary_sources
                 ],
                 "literary_sources": literary_sources,
+                "landscape_features": [
+                    {
+                        "id": feature.id,
+                        "name": feature.name,
+                        "feature_type": feature.feature_type,
+                    }
+                    for feature in (
+                        self.geography.nearest_features(
+                            settlement.grid_x, settlement.grid_y,
+                            max_distance=12.0, limit=3)
+                        if self.geography is not None else []
+                    )
+                ],
                 "description_cn": (
                     f"{year}年，{author.name}在{settlement.name}完成"
                     f"{genre_name}《{work_title}》。抄写者很快制作了数份副本。"
@@ -874,28 +1662,49 @@ class World:
             subject: Person | None = None) -> str:
         """Combine grounded keywords into a deterministic, non-pool title."""
         event_themes = list(dict.fromkeys(
-            HISTORY_THEME_BY_EVENT.get(source.get("event_type"), "往事")
-            for source in sources
+            event_theme(source.get("event_type")) for source in sources
         ))
         if genre == "biography" and subject is not None:
             role_themes = [
-                BIOGRAPHY_THEME_BY_ROLE[role]
+                role_theme(role)
                 for role in subject.roles
-                if role in BIOGRAPHY_THEME_BY_ROLE
+                if role_theme(role) is not None
             ]
             themes = list(dict.fromkeys(role_themes + event_themes))[:2]
             theme_text = "与".join(themes) if themes else "生平"
-            patterns = [
-                f"{subject.name}的{theme_text}经历",
-                f"{subject.name}：{theme_text}生平",
-                f"{subject.name}的{theme_text}人生记录",
-            ]
-            base_title = self._stable_event_choice(
-                f"{event_id}|biography_form", patterns)
+            form = self._stable_event_choice(
+                f"{event_id}|biography_form",
+                ["record", "life", "named"],
+            )
+            if form == "life":
+                base_title = f"{subject.name}{theme_text}生平"
+            elif form == "named":
+                base_title = f"{subject.name}：{theme_text}录"
+            else:
+                base_title = f"{subject.name}{theme_text}记"
             return f"{base_title}（{creation_year}年写成）"
 
         themes = event_themes[:2] or ["历年"]
         theme_text = "与".join(themes)
+        nearby = (
+            self.geography.nearest_features(
+                settlement.grid_x, settlement.grid_y,
+                max_distance=12.0, limit=1)
+            if self.geography is not None else []
+        )
+        landscape_name = nearby[0].name if nearby else settlement.name
+        if genre == "epic":
+            form = self._stable_event_choice(
+                f"{event_id}|epic_form", ["长歌", "行记", "归程歌"])
+            return f"{landscape_name}{theme_text}{form}（{creation_year}年写成）"
+        if genre == "drama":
+            form = self._stable_event_choice(
+                f"{event_id}|drama_form", ["之问", "两证", "异议剧"])
+            return f"{settlement.name}{theme_text}{form}（{creation_year}年写成）"
+        if genre == "lyric_cycle":
+            form = self._stable_event_choice(
+                f"{event_id}|lyric_form", ["短章", "组歌", "十二题"])
+            return f"{landscape_name}{theme_text}{form}（{creation_year}年写成）"
         forms = ["编年", "纪事", "年录"]
         form = self._stable_event_choice(
             f"{event_id}|chronicle_form", forms)
@@ -1138,7 +1947,9 @@ class World:
             culture_multiplier = 1.0 + min(
                 stl.cultural_influence / 2.0, 1.0)
             if rng.random() < 0.25 * pop_factor * REDUCTION * culture_multiplier:
-                event = self._event_gen.generate_festival_event(year, stl.id, stl.name)
+                religion = primary_religion(stl, self.religions)
+                event = self._event_gen.generate_festival_event(
+                    year, stl.id, stl.name, religion)
                 event.cause_event_ids = self._find_cause_events(
                     stl.id, year, "festival", {
                         "cultural_momentum": min(
@@ -1161,7 +1972,88 @@ class World:
 
             # 天象
             if rng.random() < 0.06 * REDUCTION:
-                event = self._event_gen.generate_omen_event(year, stl.id, stl.name)
+                religion = primary_religion(stl, self.religions)
+                event = self._event_gen.generate_omen_event(
+                    year, stl.id, stl.name, religion)
+                self._add_event_with_evidence(event)
+
+            # Religious reform creates a related tradition rather than
+            # replacing every local practice at once.
+            religion = primary_religion(stl, self.religions)
+            recent_reform = any(
+                event.event_type == "religious_reform"
+                and event.primary_location == stl.id
+                and year - event.year < 18
+                for event in reversed(self.events))
+            reform_roll = int.from_bytes(hashlib.sha256(
+                f"religious-reform-roll|{self.seed}|{stl.id}|{year}"
+                .encode("utf-8")).digest()[:8], "big") / 2**64
+            if (religion is not None and not recent_reform
+                    and reform_roll < 0.025 * pop_factor * REDUCTION):
+                keeper = self._get_or_create_officeholder(
+                    stl.id, year, "priest")
+                reasons = (
+                    "旧抄本之间的措辞差异", "灾后仪式能否简化的争论",
+                    "外来赞歌与本地旧仪的融合", "祭历日期长期不一致",
+                )
+                reason_index = int.from_bytes(hashlib.sha256(
+                    f"reform|{self.seed}|{stl.id}|{year}".encode("utf-8")
+                ).digest()[:4], "big") % len(reasons)
+                reformed = self._religion_mgr.create_reform(
+                    religion, stl, year, reasons[reason_index])
+                effects = [
+                    ModifyReligiousPresence(
+                        stl.id, religion.id, -0.12, "religious_reform"),
+                    ModifyReligiousPresence(
+                        stl.id, reformed.id, 0.32, "religious_reform"),
+                    ModifyReligiousTolerance(
+                        stl.id, 0.02, "reform_debate"),
+                ]
+                effect_ids = self._effect_resolver.apply_effects(effects, self)
+                event = self._event_gen.generate_religious_reform_event(
+                    year, stl.id, stl.name, religion, reformed,
+                    keeper.id, keeper.name)
+                event.effect_ids.extend(effect_ids)
+                event.effects.extend(effect_to_dict(effect) for effect in effects)
+                if int.from_bytes(hashlib.sha256(
+                        f"official-reform|{self.seed}|{stl.id}|{year}"
+                        .encode("utf-8")).digest()[:2], "big") % 4 == 0:
+                    stl.official_religion_id = reformed.id
+                self._add_event_with_evidence(event)
+
+            active_traditions = sorted(
+                ((value, religion_id)
+                 for religion_id, value in stl.religious_presence.items()
+                 if value >= 0.12 and religion_id in self.religions),
+                reverse=True,
+            )
+            recent_conflict = any(
+                event.event_type == "religious_conflict"
+                and event.primary_location == stl.id
+                and year - event.year < 20
+                for event in reversed(self.events))
+            conflict_chance = (
+                0.035 * (1.0 - stl.religious_tolerance) * REDUCTION)
+            conflict_roll = int.from_bytes(hashlib.sha256(
+                f"religious-conflict-roll|{self.seed}|{stl.id}|{year}"
+                .encode("utf-8")).digest()[:8], "big") / 2**64
+            if (len(active_traditions) >= 2 and not recent_conflict
+                    and conflict_roll < conflict_chance):
+                dominant = self.religions[active_traditions[0][1]]
+                minority = self.religions[active_traditions[1][1]]
+                effects = [
+                    ModifyStability(stl.id, delta=-0.05,
+                                    reason="religious_conflict"),
+                    ModifyReligiousTolerance(
+                        stl.id, -0.08, "religious_conflict"),
+                    ModifyReligiousPresence(
+                        stl.id, minority.id, -0.10, "religious_suppression"),
+                ]
+                effect_ids = self._effect_resolver.apply_effects(effects, self)
+                event = self._event_gen.generate_religious_conflict_event(
+                    year, stl.id, stl.name, dominant, minority)
+                event.effect_ids.extend(effect_ids)
+                event.effects.extend(effect_to_dict(effect) for effect in effects)
                 self._add_event_with_evidence(event)
 
             # 名人出生
@@ -1664,14 +2556,29 @@ class World:
                 event.details.pop("object_transfers", None)
         self._apply_event_person_movements(event)
         self._add_event(event)
-        recipes = EVIDENCE_RECIPES.get(event.event_type, [])
+        recipes = list(EVIDENCE_RECIPES.get(event.event_type, []))
+        if (event.event_type == "construction"
+                and event.details.get("building_type") == "temple"):
+            settlement = self.settlements.get(event.primary_location)
+            religion = (primary_religion(settlement, self.religions)
+                        if settlement is not None else None)
+            if religion is not None:
+                event.details.update({
+                    "religion_id": religion.id,
+                    "religion_name": religion.name,
+                    "doctrine": religion.doctrine,
+                    "ritual": religion.primary_ritual,
+                    "sacred_symbol": religion.sacred_symbol,
+                    "religion_profile": religion.text_profile(),
+                })
+            recipes.extend(EVIDENCE_RECIPES["cultural"])
         source_records = self._record_gen.create_records_for_event(
             event, recipes, self.settlements, self.persons)
         for record_versions in source_records.values():
             for record in record_versions:
                 self.records[record.id] = record
         for evd in self._evidence_gen.create_evidence_for_event(
-                event, source_records):
+                event, source_records, recipes):
             self.evidence[evd.id] = evd
             settlement = self.settlements.get(evd.location_id)
             record = self.records.get(evd.source_record_id)
@@ -1741,7 +2648,12 @@ class World:
             site = self.storage_sites.get(evd.container_id)
             if site is not None:
                 climate *= site.effective_preservation_modifier
-            destroyed = tick_natural_decay(evd, climate, rng)
+            base_subtype = evd.subtype.removesuffix("_copy")
+            decay_rng = (
+                random.Random(
+                    f"religious-decay|{self.seed}|{year}|{evd.id}")
+                if base_subtype in RELIGIOUS_CONTENT_SUBTYPES else rng)
+            destroyed = tick_natural_decay(evd, climate, decay_rng)
             if destroyed:
                 decayed += 1
         return decayed
@@ -1842,6 +2754,20 @@ class World:
                 entry.to_dict() for entry in self.knowledge_entries.values()],
             "storage_sites": [
                 site.to_dict() for site in self.storage_sites.values()],
+            "trade_routes": [
+                route.to_dict() for route in self.trade_routes.values()],
+            "road_segments": [
+                segment.to_dict() for segment in self.road_segments.values()],
+            "travel_groups": [
+                group.to_dict() for group in self.travel_groups.values()],
+            "signposts": [
+                signpost.to_dict() for signpost in self.signposts.values()],
+            "religions": [
+                tradition.to_dict() for tradition in self.religions.values()],
+            "historical_sites": [
+                site.to_dict() for site in self.historical_sites.values()],
+            "burials": [
+                burial.to_dict() for burial in self.burials.values()],
             "event_history_by_settlement": {
                 k: list(v) for k, v in self.event_history_by_settlement.items()
             },
@@ -1867,7 +2793,9 @@ class World:
     @classmethod
     def from_dict(cls, data: dict) -> "World":
         """Restore the current world schema and rebuild runtime managers."""
-        if data.get("schema_version") != WORLD_SCHEMA_VERSION:
+        source_schema = int(data.get("schema_version", 0))
+        if source_schema not in {
+                12, 13, 14, 15, 16, 17, WORLD_SCHEMA_VERSION}:
             raise ValueError(
                 f"unsupported world schema: {data.get('schema_version')!r}; "
                 f"expected {WORLD_SCHEMA_VERSION}")
@@ -1883,6 +2811,14 @@ class World:
             "_rule_cooldowns", "_state_cause_sources",
         )
         missing = [key for key in required if key not in data]
+        if source_schema == WORLD_SCHEMA_VERSION and "religions" not in data:
+            missing.append("religions")
+        if source_schema == WORLD_SCHEMA_VERSION:
+            for key in (
+                    "historical_sites", "burials", "signposts",
+                    "road_segments"):
+                if key not in data:
+                    missing.append(key)
         if missing:
             raise ValueError(
                 "incomplete world schema; missing: " + ", ".join(missing))
@@ -1922,6 +2858,34 @@ class World:
             site_data["id"]: StorageSite.from_dict(site_data)
             for site_data in data["storage_sites"]
         }
+        w.trade_routes = {
+            route_data["id"]: TradeRoute.from_dict(route_data)
+            for route_data in data.get("trade_routes", [])
+        }
+        w.road_segments = {
+            item["id"]: RoadSegment.from_dict(item)
+            for item in data.get("road_segments", [])
+        }
+        w.travel_groups = {
+            group_data["id"]: TravelGroup.from_dict(group_data)
+            for group_data in data.get("travel_groups", [])
+        }
+        w.signposts = {
+            item["id"]: Signpost.from_dict(item)
+            for item in data.get("signposts", [])
+        }
+        w.religions = {
+            item["id"]: ReligionTradition.from_dict(item)
+            for item in data.get("religions", [])
+        }
+        w.historical_sites = {
+            item["id"]: HistoricalSite.from_dict(item)
+            for item in data.get("historical_sites", [])
+        }
+        w.burials = {
+            item["id"]: BurialRecord.from_dict(item)
+            for item in data.get("burials", [])
+        }
         w.records = {
             record_data["id"]: HistoricalRecord.from_dict(record_data)
             for record_data in data["records"]
@@ -1950,8 +2914,37 @@ class World:
 
         w.geography = Geography(w.seed)
         w.geography.generate()
+        if source_schema == 12:
+            seen_pairs = set()
+            for settlement in sorted(
+                    w.settlements.values(), key=lambda item: item.id):
+                for partner_id, relationship in sorted(
+                        settlement.relationships.items()):
+                    pair = tuple(sorted((settlement.id, partner_id)))
+                    if pair in seen_pairs or relationship.trade_volume <= 0.0:
+                        continue
+                    seen_pairs.add(pair)
+                    w.ensure_trade_route(pair[0], pair[1])
+        for route in w.trade_routes.values():
+            w._attach_route_segments(route)
+            w._ensure_route_signposts(route)
+            if route.status == "active":
+                w._ensure_route_caravan(route)
+                w._ensure_route_travelers(route)
+        if source_schema < WORLD_SCHEMA_VERSION:
+            for signpost in w.signposts.values():
+                signpost.weather_to(w.current_year, w.seed)
         w._initialize_runtime_managers()
+        if not w.religions:
+            for settlement in sorted(
+                    w.settlements.values(), key=lambda item: item.id):
+                tradition = w._religion_mgr.create_origin(
+                    settlement, settlement.founded_year)
+                settlement.religious_presence = {tradition.id: 1.0}
+                settlement.official_religion_id = tradition.id
         w._restore_runtime_manager_state()
+        if source_schema < WORLD_SCHEMA_VERSION:
+            w._sync_historical_sites()
         w._validate_political_state()
         w._pressures_cache = compute_all_pressures(w)
         return w
@@ -2016,6 +3009,79 @@ class World:
             if polity.ruler_id is not None and polity.ruler_id not in self.persons:
                 raise ValueError(
                     f"polity {polity.id} references missing ruler")
+
+        for settlement in self.settlements.values():
+            if (settlement.official_religion_id is not None
+                    and settlement.official_religion_id not in self.religions):
+                raise ValueError(
+                    f"settlement {settlement.id} references missing religion")
+            unknown = set(settlement.religious_presence) - set(self.religions)
+            if unknown:
+                raise ValueError(
+                    f"settlement {settlement.id} has unknown religions: "
+                    + ", ".join(sorted(unknown)))
+
+        for site in self.historical_sites.values():
+            if (site.owner_settlement_id
+                    and site.owner_settlement_id not in self.settlements):
+                raise ValueError(
+                    f"historical site {site.id} references missing settlement")
+
+        for route in self.trade_routes.values():
+            if route.status not in {"active", "abandoned", "suspended"}:
+                raise ValueError(
+                    f"trade route {route.id} has invalid status {route.status}")
+            if set(route.segment_ids) - set(self.road_segments):
+                raise ValueError(
+                    f"trade route {route.id} references missing road segments")
+        for segment in self.road_segments.values():
+            if (abs(segment.cell_a[0] - segment.cell_b[0])
+                    + abs(segment.cell_a[1] - segment.cell_b[1]) != 1):
+                raise ValueError(
+                    f"road segment {segment.id} is not cardinally adjacent")
+            if set(segment.route_ids) - set(self.trade_routes):
+                raise ValueError(
+                    f"road segment {segment.id} references missing routes")
+            if segment.status not in {
+                    "active", "disused", "overgrown", "ruined"}:
+                raise ValueError(
+                    f"road segment {segment.id} has invalid status")
+
+        for signpost in self.signposts.values():
+            if signpost.builder_settlement_id not in self.settlements:
+                raise ValueError(
+                    f"signpost {signpost.id} references missing builder")
+            board_ids = {item.id for item in signpost.original_boards}
+            if board_ids != {item.id for item in signpost.current_boards}:
+                raise ValueError(
+                    f"signpost {signpost.id} has inconsistent boards")
+            for board in signpost.original_boards + signpost.current_boards:
+                if board.destination_id not in self.settlements:
+                    raise ValueError(
+                        f"signpost board {board.id} references missing destination")
+                if (board.writer_person_id
+                        and board.writer_person_id not in self.persons):
+                    raise ValueError(
+                        f"signpost board {board.id} references missing writer")
+            for repair in signpost.repair_history:
+                if repair.board_id not in board_ids:
+                    raise ValueError(
+                        f"signpost {signpost.id} repair references missing board")
+                if (repair.repairer_person_id
+                        and repair.repairer_person_id not in self.persons):
+                    raise ValueError(
+                        f"signpost {signpost.id} repair references missing person")
+        for burial in self.burials.values():
+            if burial.site_id not in self.historical_sites:
+                raise ValueError(
+                    f"burial {burial.id} references missing historical site")
+            if burial.person_id not in self.persons:
+                raise ValueError(
+                    f"burial {burial.id} references missing person")
+            if (burial.inscription_evidence_id
+                    and burial.inscription_evidence_id not in self.evidence):
+                raise ValueError(
+                    f"burial {burial.id} references missing inscription")
 
     # ---- 查询接口 ----
 
@@ -2114,6 +3180,30 @@ def _validate_serialized_versions(data: dict) -> None:
                     f"{item.get('id', '<unknown>')}: "
                     f"{item.get('schema_version')!r}; expected "
                     f"{schema_version}")
+    for item in data.get("religions", []):
+        if item.get("schema_version") != 1:
+            raise ValueError(
+                f"unsupported religions schema for {item.get('id', '<unknown>')}: "
+                f"{item.get('schema_version')!r}; expected 1")
+    for collection in ("historical_sites", "burials"):
+        for item in data.get(collection, []):
+            if item.get("schema_version") != 1:
+                raise ValueError(
+                    f"unsupported {collection} schema for "
+                    f"{item.get('id', '<unknown>')}: "
+                    f"{item.get('schema_version')!r}; expected 1")
+    for item in data.get("signposts", []):
+        if item.get("schema_version") != 1:
+            raise ValueError(
+                f"unsupported signposts schema for "
+                f"{item.get('id', '<unknown>')}: "
+                f"{item.get('schema_version')!r}; expected 1")
+    for item in data.get("road_segments", []):
+        if item.get("schema_version") != 1:
+            raise ValueError(
+                f"unsupported road_segments schema for "
+                f"{item.get('id', '<unknown>')}: "
+                f"{item.get('schema_version')!r}; expected 1")
 
 
 def _resolve_target_name(result, world):

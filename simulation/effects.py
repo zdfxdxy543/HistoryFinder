@@ -18,6 +18,7 @@ from config import (
 from simulation.founding import BLOCKED_FOUNDING_BIOMES
 from simulation.polity import SettlementControlPeriod
 from simulation.settlement import Settlement
+from simulation.routes import route_id
 
 if TYPE_CHECKING:
     from simulation.world import World
@@ -185,6 +186,58 @@ class ModifyCulturalInfluence:
 
 
 @dataclass
+class ModifyReligiousPresence:
+    """Change one tradition's local presence without forcing conversion."""
+    effect_type: ClassVar[str] = "modify_religious_presence"
+    settlement_id: str
+    religion_id: str
+    delta: float = 0.0
+    reason: str = ""
+
+    def validate(self, world: "World") -> bool:
+        settlement = world.settlements.get(self.settlement_id)
+        return bool(
+            settlement is not None and settlement.alive
+            and self.religion_id in world.religions)
+
+    def apply(self, world: "World") -> EffectResult:
+        settlement = world.settlements[self.settlement_id]
+        existed = self.religion_id in settlement.religious_presence
+        before = settlement.religious_presence.get(self.religion_id, 0.0)
+        settlement.religious_presence[self.religion_id] = max(
+            0.0, min(1.0, before + self.delta))
+        return EffectResult(
+            snapshot_before={"existed": existed, "value": before},
+            message=(f"{self.settlement_id}: religion {self.religion_id} "
+                     f"{before:.2f} -> "
+                     f"{settlement.religious_presence[self.religion_id]:.2f}"),
+        )
+
+
+@dataclass
+class ModifyReligiousTolerance:
+    effect_type: ClassVar[str] = "modify_religious_tolerance"
+    settlement_id: str
+    delta: float = 0.0
+    reason: str = ""
+
+    def validate(self, world: "World") -> bool:
+        settlement = world.settlements.get(self.settlement_id)
+        return settlement is not None and settlement.alive
+
+    def apply(self, world: "World") -> EffectResult:
+        settlement = world.settlements[self.settlement_id]
+        before = settlement.religious_tolerance
+        settlement.religious_tolerance = max(
+            0.0, min(1.0, before + self.delta))
+        return EffectResult(
+            snapshot_before={"value": before},
+            message=(f"{self.settlement_id}: tolerance {before:.2f} -> "
+                     f"{settlement.religious_tolerance:.2f}"),
+        )
+
+
+@dataclass
 class ModifyTheoreticalKnowledge:
     effect_type: ClassVar[str] = "modify_theoretical_knowledge"
     settlement_id: str
@@ -276,6 +329,8 @@ class ModifyRelationship:
             "b_trust": rel_b.trust, "b_hostility": rel_b.hostility,
             "b_trade_volume": rel_b.trade_volume,
             "b_last_interaction_year": rel_b.last_interaction_year,
+            "trade_route_id": "",
+            "trade_route_existed": False,
         }
 
         rel_a.trust = max(0.0, min(1.0, rel_a.trust + self.trust_delta))
@@ -287,6 +342,17 @@ class ModifyRelationship:
         rel_b.hostility = max(0.0, min(1.0, rel_b.hostility + self.hostility_delta))
         rel_b.trade_volume = max(0.0, rel_b.trade_volume + self.trade_volume_delta)
         rel_b.last_interaction_year = world.current_year
+
+        if (snapshot["a_trade_volume"] <= 0.0
+                and rel_a.trade_volume > 0.0):
+            expected_route_id = route_id(
+                self.settlement_a, self.settlement_b)
+            snapshot["trade_route_existed"] = (
+                expected_route_id in world.trade_routes)
+            route = world.ensure_trade_route(
+                self.settlement_a, self.settlement_b)
+            if route is not None:
+                snapshot["trade_route_id"] = route.id
 
         return EffectResult(
             success=True, snapshot_before=snapshot,
@@ -531,6 +597,12 @@ class FoundSettlement:
             cultural_influence=source.cultural_influence * 0.70,
             theoretical_knowledge=source.theoretical_knowledge * 0.65,
             technology_level=source.technology_level * 0.85,
+            religious_presence={
+                religion_id: max(0.0, min(1.0, presence * 0.85))
+                for religion_id, presence in source.religious_presence.items()
+            },
+            official_religion_id=source.official_religion_id,
+            religious_tolerance=source.religious_tolerance,
         )
         world.settlements[settlement.id] = settlement
         world.event_history_by_settlement[settlement.id] = []
@@ -1062,6 +1134,16 @@ class EffectResolver:
         elif isinstance(effect, ModifyCulturalInfluence):
             world.settlements[effect.settlement_id].cultural_influence = \
                 snapshot["cultural_influence"]
+        elif isinstance(effect, ModifyReligiousPresence):
+            settlement = world.settlements[effect.settlement_id]
+            if snapshot["existed"]:
+                settlement.religious_presence[effect.religion_id] = \
+                    snapshot["value"]
+            else:
+                settlement.religious_presence.pop(effect.religion_id, None)
+        elif isinstance(effect, ModifyReligiousTolerance):
+            world.settlements[effect.settlement_id].religious_tolerance = \
+                snapshot["value"]
         elif isinstance(effect, ModifyTheoreticalKnowledge):
             world.settlements[effect.settlement_id].theoretical_knowledge = \
                 snapshot["theoretical_knowledge"]
@@ -1087,6 +1169,9 @@ class EffectResolver:
                 rel.last_interaction_year = snapshot["b_last_interaction_year"]
             else:
                 b.relationships.pop(effect.settlement_a, None)
+            route_key = snapshot.get("trade_route_id", "")
+            if route_key and not snapshot.get("trade_route_existed", False):
+                world.remove_trade_route(route_key, preserve_signposts=False)
         elif isinstance(effect, StrengthenExchangeNetwork):
             a = world.settlements[effect.settlement_a]
             b = world.settlements[effect.settlement_b]

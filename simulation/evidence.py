@@ -293,6 +293,11 @@ def apply_burial_preservation(location_id: str, evidence_dict: dict[str, Evidenc
 # ---- 证据配方表 ----
 
 EVIDENCE_RECIPES = {
+    "burial": [
+        {"type": "structure", "subtype": "grave_marker",
+         "location": "settlement", "material": "stone", "copies": 0,
+         "discoverability": 0.95},
+    ],
     "founding": [
         {"type": "document", "subtype": "founding_charter", "location": "settlement",
          "material": "parchment", "copies": 1, "discoverability": 0.5},
@@ -442,6 +447,8 @@ EVIDENCE_RECIPES = {
          "material": "oral", "copies": 0, "discoverability": 0.8},
     ],
     "festival": [
+        {"type": "document", "subtype": "ritual_calendar", "location": "settlement",
+         "material": "parchment", "copies": 1, "discoverability": 0.45},
         {"type": "artifact", "subtype": "festival_token", "location": "settlement",
          "material": "metal", "copies": 0, "discoverability": 0.3},
         {"type": "oral", "subtype": "festival_song", "location": "settlement",
@@ -477,6 +484,22 @@ EVIDENCE_RECIPES = {
         {"type": "oral", "subtype": "omen_story", "location": "settlement",
          "material": "oral", "copies": 0, "discoverability": 0.9},
     ],
+    "religious_reform": [
+        {"type": "document", "subtype": "reformed_liturgy", "location": "settlement",
+         "material": "parchment", "copies": 2, "discoverability": 0.42},
+        {"type": "document", "subtype": "reform_decree", "location": "settlement",
+         "material": "parchment", "copies": 1, "discoverability": 0.38},
+        {"type": "oral", "subtype": "revised_hymn", "location": "settlement",
+         "material": "oral", "copies": 0, "discoverability": 0.82},
+    ],
+    "religious_conflict": [
+        {"type": "document", "subtype": "prohibition_edict", "location": "settlement",
+         "material": "parchment", "copies": 1, "discoverability": 0.36},
+        {"type": "artifact", "subtype": "damaged_icon", "location": "settlement",
+         "material": "stone", "copies": 0, "discoverability": 0.58},
+        {"type": "oral", "subtype": "forbidden_hymn", "location": "settlement",
+         "material": "oral", "copies": 0, "discoverability": 0.76},
+    ],
     "duel": [
         {"type": "oral", "subtype": "duel_story", "location": "settlement",
          "material": "oral", "copies": 0, "discoverability": 0.8},
@@ -484,6 +507,16 @@ EVIDENCE_RECIPES = {
          "material": "metal", "copies": 0, "discoverability": 0.2},
     ],
 }
+
+
+# These carriers are additive to the legacy simulation. Their natural decay
+# uses an isolated deterministic stream so they do not perturb political and
+# economic event rolls in existing world seeds.
+RELIGIOUS_CONTENT_SUBTYPES = frozenset({
+    "temple", "religious_text", "hymn", "ritual_calendar",
+    "reformed_liturgy", "reform_decree", "revised_hymn",
+    "prohibition_edict", "damaged_icon", "forbidden_hymn",
+})
 
 
 # 玩家可见名称只描述物体形态，不直接宣告其历史用途或来源事件。
@@ -537,6 +570,7 @@ EVIDENCE_DISPLAY_NAMES_CN = {
     "merchant_tale": "商旅间流传的故事",
     "succession_decree": "带印记的制式文书",
     "ruler_tomb": "带铭文的石质墓葬",
+    "grave_marker": "刻有完整墓志的墓碑",
     "succession_gossip": "关于权位更替的传闻",
     "census_record": "按行列书写的名册残页",
     "old_timers_memory": "老人反复讲述的往事",
@@ -555,6 +589,13 @@ EVIDENCE_DISPLAY_NAMES_CN = {
     "explorers_tale": "旅人反复讲述的见闻",
     "omen_record": "带天象图案的记录残页",
     "omen_story": "关于异常天象的故事",
+    "ritual_calendar": "按季节排列的仪式历残页",
+    "reformed_liturgy": "带密集改写痕迹的仪式诵本",
+    "reform_decree": "盖有神殿印记的礼仪告示",
+    "revised_hymn": "措辞存在分歧的新仪赞歌",
+    "prohibition_edict": "宣布禁止旧祭仪的告示残页",
+    "damaged_icon": "表面符号遭凿除的石质供物",
+    "forbidden_hymn": "被禁止后仍在流传的旧仪歌谣",
     "duel_story": "关于一场决斗的故事",
     "duel_weapon": "带缺口的单件兵器",
 }
@@ -735,9 +776,11 @@ class EvidenceGenerator:
             f"could not generate unique copied text for {evidence_id}")
 
     def create_evidence_for_event(self, event,
-                                  source_records: dict | None = None
+                                  source_records: dict | None = None,
+                                  recipes: list[dict] | None = None,
                                   ) -> list[Evidence]:
-        recipes = EVIDENCE_RECIPES.get(event.event_type, [])
+        recipes = (EVIDENCE_RECIPES.get(event.event_type, [])
+                   if recipes is None else recipes)
         evidence_list = []
         source_records = source_records or {}
 

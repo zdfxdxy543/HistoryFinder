@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from simulation.names import generate_unique_name
 from simulation.person import public_mobility_status, public_travel_role
+from simulation.religion import primary_religion
 from simulation.technology import TECHNOLOGY_ARTIFACT_SUBTYPES
 
 
@@ -29,15 +30,16 @@ TILE_FARMLAND = 13
 TILE_BRIDGE = 14
 TILE_TUNDRA = 15
 TILE_MARSH = 16
+TILE_FENCE = 17
 
 BLOCKING_TILES = {
     TILE_WALL, TILE_WATER, TILE_RUBBLE, TILE_SHELF, TILE_STALL,
-    TILE_FOREST, TILE_ROCK,
+    TILE_FOREST, TILE_ROCK, TILE_FENCE,
 }
 
 
 SITE_ZONE = {
-    "library_collection": "archive",
+    "library_collection": "library",
     "administrative_archive": "archive",
     "private_collection": "home",
     "temple_repository": "temple",
@@ -201,6 +203,24 @@ REQUIRED_BUILDING_TYPES = {
 }
 
 
+INFRASTRUCTURE_BUILDINGS = {
+    "temple": ("temple", "神殿", 11, 9),
+    "library": ("library", "图书馆", 12, 9),
+    "market": ("great_market", "大市场", 13, 9),
+    "fortification": ("fortification", "城防门楼", 13, 8),
+    "aqueduct": ("aqueduct", "引水渠水院", 13, 7),
+    "palace": ("palace", "领主大厅", 13, 10),
+}
+
+
+def infrastructure_condition(level: float) -> str:
+    if level <= 0.05:
+        return "ruined"
+    if level < 0.7:
+        return "damaged"
+    return "intact"
+
+
 OCCUPATIONS = (
     ("farmer", "农人", "正把一捆农具搬回住处。"),
     ("weaver", "织工", "衣袖上还沾着细碎的纤维。"),
@@ -245,6 +265,8 @@ class SettlementMapProfile:
     entrances: tuple[str, ...]
     base_tile: int
     landscape_type: str
+    landscape_name: str
+    feature_names: tuple[str, ...]
 
     def to_dict(self) -> dict:
         return {
@@ -255,8 +277,8 @@ class SettlementMapProfile:
             "hub": {"x": self.hub[0], "y": self.hub[1]},
             "entrances": list(self.entrances),
             "landscape_type": self.landscape_type,
-            "landscape_name": LANDSCAPE_NAMES.get(
-                self.landscape_type, self.landscape_type),
+            "landscape_name": self.landscape_name,
+            "feature_names": list(self.feature_names),
         }
 
 
@@ -295,6 +317,8 @@ class LocalBuilding:
     bounds: tuple[int, int, int, int]
     door: tuple[int, int]
     condition: str = "intact"
+    infrastructure_type: str = ""
+    infrastructure_level: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -304,20 +328,42 @@ class LocalBuilding:
             "bounds": list(self.bounds),
             "door": {"x": self.door[0], "y": self.door[1]},
             "condition": self.condition,
+            "infrastructure_type": self.infrastructure_type,
+            "infrastructure_level": self.infrastructure_level,
         }
 
 
 class LocalMapBuilder:
     """Build one local map from geography, settlement state, and history."""
 
+    def cemetery_fits(self, world, settlement) -> bool:
+        """Use the real layout pass to test space after ordinary buildings."""
+        profile = self._profile(world, settlement)
+        tiles = [profile.base_tile] * (profile.width * profile.height)
+        self._terrain(tiles, profile, world, settlement)
+        roads = self._roads(tiles, profile, world, settlement)
+        from game.world_cell_map import paint_trade_routes
+        roads.update(paint_trade_routes(
+            tiles, world, int(settlement.grid_x), int(settlement.grid_y),
+            profile.width, profile.height, profile.hub))
+        self._land_use(tiles, roads, profile, world, settlement)
+        buildings = self._place_buildings(
+            tiles, roads, profile, world, settlement)
+        return any(item.building_type == "cemetery" for item in buildings)
+
     def build(self, world, settlement) -> dict:
         profile = self._profile(world, settlement)
         tiles = [profile.base_tile] * (profile.width * profile.height)
         self._terrain(tiles, profile, world, settlement)
         roads = self._roads(tiles, profile, world, settlement)
+        from game.world_cell_map import paint_trade_routes, route_signature
+        from simulation.historical_sites import site_signature
+        roads.update(paint_trade_routes(
+            tiles, world, int(settlement.grid_x), int(settlement.grid_y),
+            profile.width, profile.height, profile.hub))
         self._land_use(tiles, roads, profile, world, settlement)
         buildings = self._place_buildings(
-            tiles, roads, profile, world.seed, settlement)
+            tiles, roads, profile, world, settlement)
         zones, zone_candidates = self._zones(
             tiles, roads, buildings, profile)
         if not settlement.alive:
@@ -339,23 +385,44 @@ class LocalMapBuilder:
         targets = build_evidence_targets(
             world.evidence.values(), world.storage_sites, settlement.id)
         evidence_by_id = world.evidence
+        burial_by_evidence = {
+            burial.inscription_evidence_id: burial
+            for burial in world.burials.values()
+            if burial.inscription_evidence_id
+        }
+        grave_candidates = [
+            candidate for candidate in self._grave_candidates(buildings)
+            if candidate not in protected
+        ]
+        grave_index = 0
         for target in targets:
             first_evidence = evidence_by_id[target["evidence_ids"][0]]
+            burial = burial_by_evidence.get(first_evidence.id)
             site = world.storage_sites.get(target["storage_site_id"])
             site_type = site.site_type if site is not None else "field_site"
             zone = SITE_ZONE.get(site_type, "field")
             placement = target["placement_kind"]
             label, description, _, blocks_movement = \
                 PLACEMENT_PROFILES[placement]
-            candidates = self._placement_candidates(
-                placement, zone, zone_candidates, buildings,
-                roads, tiles, profile)
             index_key = f"{zone}:{placement}"
-            position = self._next_evidence_position(
-                candidates, occupied, protected, blocking_entities,
-                required_doors, interaction_targets,
-                zone_indexes.get(index_key, 0),
-                blocks_movement, tiles, profile, player_start)
+            if burial is not None and grave_candidates:
+                available = [
+                    candidate for candidate in grave_candidates
+                    if candidate not in occupied
+                ]
+                position = (
+                    available[grave_index % len(available)] if available
+                    else grave_candidates[grave_index % len(grave_candidates)])
+                grave_index += 1
+            else:
+                candidates = self._placement_candidates(
+                    placement, zone, zone_candidates, buildings,
+                    roads, tiles, profile)
+                position = self._next_evidence_position(
+                    candidates, occupied, protected, blocking_entities,
+                    required_doors, interaction_targets,
+                    zone_indexes.get(index_key, 0),
+                    blocks_movement, tiles, profile, player_start)
             zone_indexes[index_key] = zone_indexes.get(index_key, 0) + 1
             occupied.add(position)
             interaction_targets.add(position)
@@ -369,9 +436,15 @@ class LocalMapBuilder:
             state = "intact" if condition_value >= 0.7 else (
                 "weathered" if condition_value >= 0.3 else "ruined")
             if target["kind"] == "evidence":
-                name = first_evidence.physical_features.get(
-                    "display_name", first_evidence.subtype.replace("_", " "))
-                subtype = first_evidence.evidence_type
+                grave_person = (
+                    world.persons.get(burial.person_id)
+                    if burial is not None else None)
+                name = (f"{grave_person.name}的墓碑" if grave_person is not None
+                        else first_evidence.physical_features.get(
+                            "display_name",
+                            first_evidence.subtype.replace("_", " ")))
+                subtype = (first_evidence.subtype if burial is not None
+                           else first_evidence.evidence_type)
                 material = first_evidence.material
                 state = first_evidence.state
             else:
@@ -391,7 +464,8 @@ class LocalMapBuilder:
                     access, access),
                 state=state,
                 material=material,
-                zone=site.name if site is not None else "露天调查区",
+                zone=("墓园" if burial is not None else
+                      site.name if site is not None else "露天调查区"),
                 description_cn=description,
                 accessibility=access,
                 condition=condition,
@@ -399,6 +473,11 @@ class LocalMapBuilder:
                 storage_site_id=target["storage_site_id"],
                 blocks_movement=blocks_movement,
             ))
+
+        temple_fixtures = self._temple_fixtures(
+            world, settlement, buildings, occupied, protected,
+            tiles, profile)
+        entities.extend(temple_fixtures)
 
         npc_candidates = self._npc_candidates(
             tiles, roads, occupied, profile)
@@ -455,11 +534,14 @@ class LocalMapBuilder:
         if not settlement.alive:
             buildings = [LocalBuilding(
                 item.id, item.name, item.building_type,
-                item.bounds, item.door, "ruined")
+                item.bounds, item.door, "ruined",
+                item.infrastructure_type, item.infrastructure_level)
                 for item in buildings]
         return {
-            "schema_version": 5,
+            "schema_version": 6,
             "site_type": site_type,
+            "cell": {
+                "x": int(settlement.grid_x), "y": int(settlement.grid_y)},
             "width": profile.width,
             "height": profile.height,
             "profile": profile.to_dict(),
@@ -467,10 +549,88 @@ class LocalMapBuilder:
             "blocking_tiles": sorted(BLOCKING_TILES),
             "player_start": {"x": player_start[0], "y": player_start[1]},
             "entities": [item.to_dict() for item in entities],
+            "decorations": [],
             "discovered_evidence": [],
             "buildings": [item.to_dict() for item in buildings],
             "zones": zones,
+            "route_signature": route_signature(
+                world, int(settlement.grid_x), int(settlement.grid_y)),
+            "historical_site_signature": site_signature(
+                world.get_historical_sites_at(
+                    int(settlement.grid_x), int(settlement.grid_y))),
         }
+
+    @staticmethod
+    def _grave_candidates(
+            buildings: list[LocalBuilding]) -> list[tuple[int, int]]:
+        cemetery = next((
+            building for building in buildings
+            if building.building_type == "cemetery"
+        ), None)
+        if cemetery is None:
+            return []
+        left, top, right, bottom = cemetery.bounds
+        center_x = (left + right) // 2
+        return [
+            (x, y)
+            for y in range(top + 1, bottom, 2)
+            for x in range(left + 1, right)
+            if x != center_x
+        ]
+
+    def _temple_fixtures(
+            self, world, settlement, buildings: list[LocalBuilding],
+            occupied: set[tuple[int, int]],
+            protected: set[tuple[int, int]], tiles: list[int],
+            profile: SettlementMapProfile) -> list[LocalMapEntity]:
+        religion = primary_religion(settlement, world.religions)
+        if religion is None:
+            return []
+        temples = [
+            building for building in buildings
+            if building.building_type == "temple"]
+        result = []
+        fixture_specs = (
+            (
+                "temple_altar", "仪式祭台", "祭坛",
+                f"石台正面刻着{religion.sacred_symbol}。边缘不同年代的"
+                "凿痕表明，其陈设曾被多次调整。",
+            ),
+            (
+                "offering_table", "公共供桌", "供物陈设",
+                f"桌面残留{religion.offering}的痕迹。依照{religion.name}的仪次，"
+                f"此处应由{religion.officiant}收取供物，但痕迹本身不能证明由谁主持。",
+            ),
+            (
+                "votive_wall", "还愿铭记墙", "铭记墙",
+                f"墙面回应着“{religion.congregation_response}”的仪式要求。"
+                "新旧姓名彼此覆盖，其中一些符号与正式经文并不完全相同。",
+            ),
+        )
+        for temple in temples:
+            candidates = [
+                item for item in reversed(self._building_candidates(
+                    tiles, profile, temple))
+                if item not in occupied and item not in protected]
+            for index, (subtype, name, role_name, description) in enumerate(
+                    fixture_specs):
+                if not candidates:
+                    break
+                position = candidates.pop(0)
+                occupied.add(position)
+                result.append(LocalMapEntity(
+                    id=f"{temple.id}_{subtype}",
+                    kind="landmark",
+                    x=position[0], y=position[1],
+                    name=name, subtype=subtype,
+                    role="religious_fixture", role_name=role_name,
+                    state=temple.condition,
+                    material="stone" if index != 1 else "wood",
+                    zone=temple.name,
+                    description_cn=description,
+                    blocks_movement=False,
+                ))
+        return result
 
     def _profile(self, world, settlement) -> SettlementMapProfile:
         peak = max(settlement.population, settlement.peak_population)
@@ -543,9 +703,25 @@ class LocalMapBuilder:
         base_tile = TILE_SAND if landscape in {
             "desert", "scrubland"} else (
             TILE_TUNDRA if landscape == "tundra" else TILE_GRASS)
+        feature_types = {
+            "river": {"river"},
+            "harbor": {"lake"},
+            "terrace": {"mountain"},
+            "woodland": {"forest"},
+            "oasis": {"desert"},
+            "frontier": {"tundra"},
+        }.get(layout, {"plains"})
+        nearby_features = geography.nearest_features(
+            sx, sy, feature_types, max_distance=10.0, limit=2)
+        feature_names = tuple(feature.name for feature in nearby_features)
+        landscape_name = (
+            feature_names[0] if feature_names else
+            LANDSCAPE_NAMES.get(landscape, landscape)
+        )
         return SettlementMapProfile(
             width, height, layout, water_axis, water_side,
-            (hub_x, hub_y), entrances, base_tile, landscape)
+            (hub_x, hub_y), entrances, base_tile, landscape,
+            landscape_name, feature_names)
 
     def _landscape_type(self, geography, sx: int, sy: int) -> str:
         scores: dict[str, float] = {}
@@ -908,8 +1084,9 @@ class LocalMapBuilder:
             roads.add((px, py))
 
     def _place_buildings(self, tiles: list[int], roads: set[tuple[int, int]],
-                         profile: SettlementMapProfile, seed: int,
+                         profile: SettlementMapProfile, world,
                          settlement) -> list[LocalBuilding]:
+        seed = world.seed
         specs = [
             ("hall", "公共厅堂", 11, 9),
             ("market", "集市会馆", 11, 8),
@@ -930,10 +1107,46 @@ class LocalMapBuilder:
             specs.append(("cistern", "蓄水院", 9, 7))
         else:
             specs.append(("mill", "磨坊", 9, 7))
-        if settlement.infrastructure.get("temple", 0.0) > 0:
-            specs.append(("temple", "神殿", 11, 9))
-        if settlement.infrastructure.get("library", 0.0) > 0.4:
-            specs.append(("academy", "学舍", 10, 8))
+        infrastructure_specs = []
+        for infrastructure_type, (kind, base_name, width, height) in (
+                INFRASTRUCTURE_BUILDINGS.items()):
+            if infrastructure_type not in settlement.infrastructure:
+                continue
+            level = float(settlement.infrastructure[infrastructure_type])
+            condition = infrastructure_condition(level)
+            size_bonus = min(2, max(0, int(level - 1.0)))
+            condition_prefix = {
+                "damaged": "受损的",
+                "ruined": "废弃的",
+            }.get(condition, "")
+            upgrade_prefix = "扩建的" if level >= 2.0 else ""
+            infrastructure_specs.append((
+                kind, f"{condition_prefix or upgrade_prefix}{base_name}",
+                width + size_bonus, height + size_bonus,
+                infrastructure_type, level, condition,
+            ))
+        cemetery = next((
+            site for site in world.get_historical_sites_at(
+                int(settlement.grid_x), int(settlement.grid_y))
+            if site.site_type == "cemetery"
+            and site.owner_settlement_id == settlement.id
+        ), None)
+        if cemetery is not None:
+            cemetery_condition = (
+                "ruined" if cemetery.state in {"abandoned", "ruined"}
+                else "damaged" if cemetery.state == "damaged" else "intact")
+            infrastructure_specs.append((
+                "cemetery", cemetery.name, 6, 8,
+                "historical_site", cemetery.condition,
+                cemetery_condition,
+            ))
+
+        cemetery_specs = [
+            item for item in infrastructure_specs if item[0] == "cemetery"]
+        specs.extend(
+            (kind, name, width, height)
+            for kind, name, width, height, _, _, _ in infrastructure_specs
+            if kind != "cemetery")
 
         peak = max(settlement.population, settlement.peak_population)
         size_bonus = {"village": 0, "town": 5, "city": 12}.get(
@@ -942,15 +1155,23 @@ class LocalMapBuilder:
         specs.extend(
             ("home", f"民居 {index + 1}", 7, 6)
             for index in range(home_count))
+        # A cemetery may use only land left after civic buildings and homes.
+        specs.extend(
+            (kind, name, width, height)
+            for kind, name, width, height, _, _, _ in cemetery_specs)
 
         buildings = []
         reserved: set[tuple[int, int]] = set()
+        infrastructure_by_kind = {
+            item[0]: item[4:] for item in infrastructure_specs}
         for index, (kind, name, width, height) in enumerate(specs):
+            infrastructure_type, level, condition = (
+                infrastructure_by_kind.get(kind, ("", 0.0, "intact")))
             building = self._find_lot(
                 tiles, roads, reserved, profile,
                 kind, name, width, height,
                 self._stable_int(str(seed), settlement.id, kind, str(index)),
-                index,
+                index, condition, infrastructure_type, level,
             )
             if building is None:
                 continue
@@ -965,7 +1186,9 @@ class LocalMapBuilder:
     def _find_lot(self, tiles: list[int], roads: set[tuple[int, int]],
                   reserved: set[tuple[int, int]], profile: SettlementMapProfile,
                   kind: str, name: str, width: int, height: int,
-                  seed: int, ordinal: int) -> LocalBuilding | None:
+                  seed: int, ordinal: int, condition: str = "intact",
+                  infrastructure_type: str = "",
+                  infrastructure_level: float = 0.0) -> LocalBuilding | None:
         candidates = sorted(roads, key=lambda item: (item[1], item[0]))
         if not candidates:
             return None
@@ -974,7 +1197,8 @@ class LocalMapBuilder:
         while math.gcd(step, len(candidates)) != 1:
             step += 2
         search_count = (
-            len(candidates) if kind in REQUIRED_BUILDING_TYPES
+            len(candidates) if (
+                kind in REQUIRED_BUILDING_TYPES or infrastructure_type)
             else min(len(candidates), 512)
         )
         directions = ("north", "south", "west", "east")
@@ -1014,12 +1238,31 @@ class LocalMapBuilder:
                     continue
                 return LocalBuilding(
                     f"{kind}_{ordinal:02d}", name, kind,
-                    (left, top, right, bottom), door)
+                    (left, top, right, bottom), door, condition,
+                    infrastructure_type, infrastructure_level)
         return None
 
     def _paint_building(self, tiles: list[int], profile: SettlementMapProfile,
                         building: LocalBuilding) -> None:
         left, top, right, bottom = building.bounds
+        if building.building_type == "cemetery":
+            for y in range(top, bottom + 1):
+                for x in range(left, right + 1):
+                    edge = x in {left, right} or y in {top, bottom}
+                    tile = TILE_FENCE if edge else profile.base_tile
+                    if (building.condition in {"damaged", "ruined"}
+                            and edge
+                            and self._stable_int(
+                                building.id, str(x), str(y)) % 5 == 0):
+                        tile = profile.base_tile
+                    self._set(tiles, profile, x, y, tile)
+            center_x = (left + right) // 2
+            for y in range(top + 1, bottom + 1):
+                self._set(tiles, profile, center_x, y, TILE_SERVICE_FLOOR)
+            self._set(
+                tiles, profile, building.door[0], building.door[1],
+                TILE_SERVICE_FLOOR)
+            return
         if building.building_type == "well":
             for y in range(top, bottom + 1):
                 for x in range(left, right + 1):
@@ -1030,21 +1273,44 @@ class LocalMapBuilder:
             return
         floor = TILE_HOME_FLOOR if building.building_type == "home" else (
             TILE_SERVICE_FLOOR if building.building_type in {
-                "inn", "bakery", "granary", "market", "dock", "mill",
-                "quarry", "lumberyard", "cistern"} else TILE_FLOOR)
+                "inn", "bakery", "granary", "market", "great_market",
+                "dock", "mill", "quarry", "lumberyard", "cistern",
+                "aqueduct"} else TILE_FLOOR)
         for y in range(top, bottom + 1):
             for x in range(left, right + 1):
                 edge = x in {left, right} or y in {top, bottom}
                 self._set(tiles, profile, x, y, TILE_WALL if edge else floor)
         self._set(tiles, profile, building.door[0], building.door[1], floor)
 
-        if building.building_type == "archive":
+        if building.building_type in {"archive", "library"}:
             for y in range(top + 2, bottom - 1):
                 self._set(tiles, profile, left + 2, y, TILE_SHELF)
                 self._set(tiles, profile, right - 2, y, TILE_SHELF)
-        elif building.building_type in {"workshop", "granary", "market"}:
+        elif building.building_type in {
+                "workshop", "granary", "market", "great_market"}:
             for x in range(left + 2, right - 1, 3):
                 self._set(tiles, profile, x, top + 2, TILE_STALL)
+                if building.building_type == "great_market":
+                    self._set(tiles, profile, x, bottom - 2, TILE_STALL)
+        elif building.building_type == "aqueduct":
+            channel_y = (top + bottom) // 2
+            for x in range(left + 2, right - 1):
+                self._set(tiles, profile, x, channel_y, TILE_WATER)
+        elif building.building_type == "fortification":
+            for x, y in (
+                    (left + 2, top + 2), (right - 2, top + 2),
+                    (left + 2, bottom - 2), (right - 2, bottom - 2)):
+                self._set(tiles, profile, x, y, TILE_WALL)
+        elif building.building_type == "palace":
+            for x in range(left + 3, right - 2):
+                self._set(tiles, profile, x, top + 3, TILE_WALL)
+
+        if building.condition in {"damaged", "ruined"}:
+            spacing = 5 if building.condition == "damaged" else 3
+            for x in range(left + 1, right):
+                if (x + top + left) % spacing == 0:
+                    self._set(tiles, profile, x, top, TILE_RUBBLE)
+            self._set(tiles, profile, building.door[0], building.door[1], floor)
 
     def _zones(self, tiles: list[int], roads: set[tuple[int, int]],
                buildings: list[LocalBuilding],
@@ -1054,6 +1320,9 @@ class LocalMapBuilder:
         primary = {
             "archive": "档案馆", "workshop": "工坊",
             "hall": "公共厅堂", "market": "集市",
+            "library": "图书馆", "great_market": "大市场",
+            "fortification": "城防门楼", "aqueduct": "引水渠水院",
+            "palace": "领主大厅",
         }
         for kind, name in primary.items():
             building = next(
@@ -1102,7 +1371,7 @@ class LocalMapBuilder:
         candidates["field"] = field or public
         for required in (
                 "archive", "workshop", "hall", "market", "home", "granary",
-                "temple"):
+                "temple", "library"):
             candidates.setdefault(required, public)
         zones.extend([
             {"id": "monument", "name": "中心纪念地",
@@ -1169,8 +1438,16 @@ class LocalMapBuilder:
             buildings: list[LocalBuilding], roads: set[tuple[int, int]],
             tiles: list[int], profile: SettlementMapProfile,
     ) -> list[tuple[int, int]]:
+        effective_zone = zone
         matching_buildings = [
             item for item in buildings if item.building_type == zone]
+        if (not matching_buildings
+                and placement in {"bookshelf", "scroll_chest"}
+                and zone in {"library", "temple"}):
+            effective_zone = "archive"
+            matching_buildings = [
+                item for item in buildings
+                if item.building_type == effective_zone]
         if placement == "bookshelf" and matching_buildings:
             shelves = []
             for building in matching_buildings:
@@ -1185,7 +1462,7 @@ class LocalMapBuilder:
                 return sorted(shelves, key=lambda item: (item[1], item[0]))
 
         candidates = list(zone_candidates.get(
-            zone, zone_candidates.get("field", ())))
+            effective_zone, zone_candidates.get("field", ())))
         fixture_types = {
             "archive_cabinet", "scroll_chest", "ledger_shelf",
             "document_chest", "collection_chest", "tool_rack",

@@ -675,9 +675,7 @@ class EventRuleRegistry:
                    min(s.treasury / 500.0, 1.0)),
             ],
             possible_outcomes=[
-                # 新创作暂时只开放编年史和人物传记。史诗、剧作与
-                # 组诗的正文渲染器仍保留，用于兼容既有世界和抄本。
-                PO("chronicle", severity=0.22, base_weight=0.55,
+                PO("chronicle", severity=0.22, base_weight=0.30,
                    title_template_cn="$SETTLEMENT_NAME编成新的地方编年史",
                    effects=[
                        ModifyTreasury("$SETTLEMENT", delta=-22.0,
@@ -687,7 +685,7 @@ class EventRuleRegistry:
                        ModifyLegitimacy("$SETTLEMENT", delta=0.02,
                                         reason="historical_memory"),
                    ]),
-                PO("biography", severity=0.20, base_weight=0.45,
+                PO("biography", severity=0.20, base_weight=0.24,
                    title_template_cn="$SETTLEMENT_NAME出现新的人物传记",
                    effects=[
                        ModifyTreasury("$SETTLEMENT", delta=-18.0,
@@ -696,6 +694,30 @@ class EventRuleRegistry:
                                                reason="biographical_memory"),
                        ModifyLegitimacy("$SETTLEMENT", delta=0.01,
                                         reason="historical_memory"),
+                   ]),
+                PO("epic", severity=0.24, base_weight=0.18,
+                   title_template_cn="$SETTLEMENT_NAME出现新的长篇叙事诗",
+                   effects=[
+                       ModifyTreasury("$SETTLEMENT", delta=-24.0,
+                                      reason="epic_patronage"),
+                       ModifyCulturalInfluence("$SETTLEMENT", delta=0.34,
+                                               reason="public_recitation"),
+                   ]),
+                PO("drama", severity=0.21, base_weight=0.13,
+                   title_template_cn="$SETTLEMENT_NAME出现新的剧作",
+                   effects=[
+                       ModifyTreasury("$SETTLEMENT", delta=-20.0,
+                                      reason="dramatic_patronage"),
+                       ModifyCulturalInfluence("$SETTLEMENT", delta=0.31,
+                                               reason="public_performance"),
+                   ]),
+                PO("lyric_cycle", severity=0.18, base_weight=0.15,
+                   title_template_cn="$SETTLEMENT_NAME出现新的组诗",
+                   effects=[
+                       ModifyTreasury("$SETTLEMENT", delta=-16.0,
+                                      reason="lyric_patronage"),
+                       ModifyCulturalInfluence("$SETTLEMENT", delta=0.27,
+                                               reason="lyric_circulation"),
                    ]),
             ],
             cooldown_years=6, base_probability=0.008, max_probability=0.18,

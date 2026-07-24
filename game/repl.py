@@ -706,6 +706,7 @@ class GameREPL:
             "elder": "地方长者",
             "merchant": "商人",
             "artisan": "工匠",
+            "priest": "仪式保管人",
         }
         print("\n===== 当地咨询者 =====")
         for informant in informants:

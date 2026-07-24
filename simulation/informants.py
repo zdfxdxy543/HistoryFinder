@@ -9,7 +9,9 @@ from simulation.names import generate_unique_name
 from simulation.person import Person
 
 
-INFORMANT_ROLES = ("scholar", "scribe", "elder", "merchant", "artisan")
+INFORMANT_ROLES = (
+    "scholar", "scribe", "elder", "merchant", "artisan", "priest",
+)
 
 
 ROLE_PERSON_ROLES = {
@@ -18,6 +20,7 @@ ROLE_PERSON_ROLES = {
     "elder": "elder",
     "merchant": "merchant",
     "artisan": "artisan",
+    "priest": "priest",
 }
 
 
@@ -52,6 +55,13 @@ ROLE_EXPERTISE = {
         "warfare": 0.30,
         "natural_philosophy": 0.34,
     },
+    "priest": {
+        "religion": 0.84,
+        "local_history": 0.58,
+        "paleography": 0.55,
+        "languages": 0.42,
+        "astronomy": 0.35,
+    },
 }
 
 
@@ -61,6 +71,7 @@ ROLE_INSTITUTIONS = {
     "elder": ["oral_tradition"],
     "merchant": ["merchant_archive"],
     "artisan": ["workshop_collection"],
+    "priest": ["temple_repository", "community_tradition"],
 }
 
 
@@ -78,6 +89,10 @@ DOCUMENT_ROLE_RULES = {
     "artisan": {
         "construction_record", "research_notes",
         "reconstruction_account",
+    },
+    "priest": {
+        "religious_text", "ritual_calendar", "reformed_liturgy",
+        "reform_decree", "prohibition_edict", "omen_record",
     },
 }
 
@@ -350,6 +365,7 @@ class InformantManager:
             "scribe": (24, 48),
             "merchant": (25, 50),
             "artisan": (25, 52),
+            "priest": (30, 60),
         }
         minimum, maximum = age_ranges[role]
         age = minimum + self._stable_int(key, "age") % (maximum - minimum + 1)
@@ -444,6 +460,10 @@ class InformantManager:
     def _recipient_roles(evidence, record) -> set[str]:
         if evidence.evidence_type == "oral":
             roles = {"elder"}
+            if record.carrier_subtype in {
+                    "hymn", "festival_song", "revised_hymn",
+                    "forbidden_hymn", "omen_story"}:
+                roles.add("priest")
             if record.record_type in {"ledger", "receipt"}:
                 roles.add("merchant")
             return roles
@@ -469,6 +489,7 @@ class InformantManager:
             "author": 0.64,
             "opposition": 0.58,
             "folk": 0.48,
+            "ritual_office": 0.62,
         }.get(record.perspective, 0.55)
         return max(0.10, min(0.95, 0.45 * condition + 0.55 * perspective))
 

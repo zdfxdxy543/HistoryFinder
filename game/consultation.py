@@ -272,7 +272,11 @@ class ConsultationEngine:
             record: RecordPublicView | None,
             held_knowledge: tuple[HeldKnowledgeView, ...],
             ) -> ConsultationResult:
-        role_names = {"merchant": "商旅与账目", "artisan": "材料与工艺"}
+        role_names = {
+            "merchant": "商旅与账目",
+            "artisan": "材料与工艺",
+            "priest": "仪式文本与本地礼俗",
+        }
         expertise = self._relevant_expertise(consultant, evidence)
         notes = [
             f"{consultant.name}只从自己熟悉的{role_names.get(consultant.role, '领域')}"
@@ -303,6 +307,18 @@ class ConsultationEngine:
                 basis_codes=("trade_forms", "marks"),
                 uncertainty_codes=("origin_unknown",),
                 expertise_bonus=min(0.30, expertise * 0.35),
+            ))
+        elif consultant.role == "priest":
+            statements.append(self._statement(
+                consultation_id, 1, consultant, evidence,
+                statement_type="professional_observation",
+                statement_cn=(
+                    f"{consultant.name}可以辨认本地仪式符号和诵文惯例，"
+                    "但其解释代表神殿保存的版本，不等同于无争议的历史事实。"
+                ),
+                basis_codes=("ritual_practice", "institutional_memory"),
+                uncertainty_codes=("institutional_perspective",),
+                expertise_bonus=min(0.32, expertise * 0.38),
             ))
 
         matched = self._match_held_knowledge(evidence, held_knowledge)

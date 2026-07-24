@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import math
 
 from game.comparison import ComparisonEngine
@@ -16,8 +17,13 @@ from game.investigation import (
     build_reading_statements,
 )
 from game.knowledge import PlayerKnowledge
-from game.local_map import LocalMapBuilder, build_evidence_targets
+from game.local_map import build_evidence_targets
 from game.local_time import LocalTimeSimulation
+from game.world_cell_map import (
+    LocalMapRepository,
+    cell_key,
+    decorate_travel_groups,
+)
 from simulation.person import (
     HIDDEN_TRAVEL_ROLES,
     public_mobility_status,
@@ -44,6 +50,7 @@ ROLE_NAMES = {
     "elder": "地方长者",
     "merchant": "商人",
     "artisan": "工匠",
+    "priest": "仪式保管人",
 }
 
 
@@ -62,6 +69,8 @@ PLAYER_BIOME_CODES = {
     "plains": 8, "ocean": 9, "lake": 10, "river": 11,
 }
 
+FIRST_CHEAT_CODE = "HF-VISION"
+
 
 class PlayerActionError(ValueError):
     pass
@@ -76,15 +85,20 @@ class PlayerSession:
         self.known_languages = {"common"}
         self._consultation_engine = ConsultationEngine()
         self._comparison_engine = ComparisonEngine()
+        self._unlocked_cheats: set[str] = set()
+        self.full_map_vision = False
+        self._explored_by_cell: dict[str, set[tuple[int, int]]] = {}
         self.current_location_id = settlement_id or self._starting_settlement_id()
         settlement = self.world.settlements[self.current_location_id]
-        self.local_map = LocalMapBuilder().build(self.world, settlement)
-        self._local_maps = {self.current_location_id: self.local_map}
+        self.current_cell = (int(settlement.grid_x), int(settlement.grid_y))
+        self._map_repository = LocalMapRepository(self.world)
+        self.local_map = self._map_repository.get(*self.current_cell)
+        decorate_travel_groups(self.local_map, self.world)
         self._decorate_local_map_evidence()
         self.local_time = LocalTimeSimulation(
             self.local_map,
             world_seed=self.world.seed,
-            location_id=settlement.id,
+            location_id=cell_key(*self.current_cell),
             biome=str(settlement.biome),
         )
 
@@ -111,6 +125,38 @@ class PlayerSession:
             "world_map": self._world_map_payload(),
             "informants": self._informants_payload(),
             "journal": self.journal_payload(),
+            "cheats": self._cheats_payload(),
+        }
+
+    def enter_cheat_code(self, code: str) -> dict:
+        if code.strip().upper() != FIRST_CHEAT_CODE:
+            raise PlayerActionError("作弊码无效。")
+        self._unlocked_cheats.add("full_map_vision")
+        return {
+            "action": "enter_cheat",
+            "cheats": self._cheats_payload(),
+            "runtime": self.local_time.snapshot(),
+        }
+
+    def set_cheat(self, cheat_id: str, enabled: bool) -> dict:
+        if cheat_id != "full_map_vision":
+            raise PlayerActionError("无法识别这个作弊选项。")
+        if cheat_id not in self._unlocked_cheats:
+            raise PlayerActionError("这个作弊选项尚未解锁。")
+        self.full_map_vision = bool(enabled)
+        self.local_time.full_map_vision = self.full_map_vision
+        return {
+            "action": "set_cheat",
+            "cheats": self._cheats_payload(),
+            "runtime": self.local_time.snapshot(),
+        }
+
+    def _cheats_payload(self) -> dict:
+        return {
+            "full_map_vision": {
+                "unlocked": "full_map_vision" in self._unlocked_cheats,
+                "enabled": self.full_map_vision,
+            },
         }
 
     def examine(self, evidence_id: str) -> dict:
@@ -126,7 +172,7 @@ class PlayerSession:
                 None,
             )
             if (marker is None
-                    or evidence.location_id != self.current_location_id
+                    or evidence.location_id != self._active_location_id()
                     or evidence.state == "destroyed"
                     or evidence.evidence_type == "oral"):
                 raise PlayerActionError("这里找不到这件证物。")
@@ -172,7 +218,7 @@ class PlayerSession:
         target = next(
             (item for item in build_evidence_targets(
                 self.world.evidence.values(), self.world.storage_sites,
-                self.current_location_id)
+                self._active_location_id())
              if item["id"] == container_id),
             None,
         )
@@ -229,7 +275,7 @@ class PlayerSession:
                 None,
             )
             if (marker is None
-                    or candidate.location_id != self.current_location_id
+                    or candidate.location_id != self._active_location_id()
                     or candidate.state == "destroyed"):
                 raise PlayerActionError("这里找不到这处铭文。")
             distance = (
@@ -247,7 +293,7 @@ class PlayerSession:
             evidence = materialize_text_carrier(self.world, evidence.id)
         result = read_document(evidence, self.known_languages)
         reading = DocumentReading.from_result(
-            evidence.id, self.current_location_id, result)
+            evidence.id, self._active_location_id(), result)
         statements = ()
         record = self.world.records.get(evidence.source_record_id)
         if result.get("status") == "readable" and record is not None:
@@ -362,32 +408,78 @@ class PlayerSession:
             "dialogue_cn": resident["dialogue_cn"],
         }, 5)
 
+    def inspect_wilderness(self, entity_id: str) -> dict:
+        entity = next(
+            (item for item in self.local_map["entities"]
+             if item["id"] == entity_id
+             and item["kind"] in {
+                 "landmark", "camp", "caravan", "traveler", "trace",
+                 "wildlife"}),
+            None,
+        )
+        if entity is None:
+            raise PlayerActionError("这里没有这个荒野地点或旅行队伍。")
+        position = (entity["x"], entity["y"])
+        runtime_npc = self.local_time._npcs.get(entity_id)
+        if runtime_npc is not None:
+            position = (runtime_npc["x"], runtime_npc["y"])
+        if (abs(position[0] - self.local_time.player["x"])
+                + abs(position[1] - self.local_time.player["y"]) > 1):
+            raise PlayerActionError("需要走近后才能查看或交谈。")
+        return self._finish_action({
+            "action": "inspect_wilderness",
+            "subject": {
+                "id": entity["id"],
+                "name": entity["name"],
+                "kind": entity["kind"],
+                "subtype": entity["subtype"],
+                "zone": entity["zone"],
+                "cargo": list(entity.get("cargo", [])),
+                "destination_name": entity.get("destination_name", ""),
+                "religion_name": entity.get("religion_name", ""),
+                "guard_count": int(entity.get("guard_count", 0)),
+            },
+            "description_cn": entity.get("description_cn", ""),
+            "dialogue_cn": entity.get("dialogue_cn", ""),
+        }, 3)
+
     def move(self, dx: int, dy: int) -> dict:
         try:
             result = self.local_time.move_player(dx, dy)
         except ValueError as exc:
             raise PlayerActionError(str(exc)) from exc
+        if result.get("exit_map"):
+            return self._move_to_adjacent_cell(result["exit_map"])
+        if result.get("moved"):
+            if self._advance_travel_time(1):
+                result["local_map"] = self.local_map
+                result["runtime"] = self.local_time.snapshot()
         return {"action": "move", **result}
 
     def wait(self, minutes: int = 10) -> dict:
         if minutes not in {5, 10, 15, 30, 60}:
             raise PlayerActionError("只能等待 5、10、15、30 或 60 分钟。")
+        runtime = self.local_time.advance(minutes)
+        changed = self._advance_travel_time(minutes)
         return {
             "action": "wait",
             "minutes": minutes,
-            "runtime": self.local_time.advance(minutes),
+            "runtime": self.local_time.snapshot() if changed else runtime,
+            **({"local_map": self.local_map} if changed else {}),
         }
 
     def travel(self, destination_id: str) -> dict:
         destination = self.world.settlements.get(destination_id)
-        if destination is None:
-            raise PlayerActionError("世界地图上没有这个地点。")
+        if destination is None or not destination.alive:
+            raise PlayerActionError("世界地图上没有这个可快速旅行的城镇。")
         if destination_id == self.current_location_id:
             raise PlayerActionError("你已经在这个地点。")
-        origin = self.world.settlements[self.current_location_id]
+        self._remember_current_exploration()
+        origin = self._current_settlement()
+        origin_cell = self.current_cell
         distance = math.hypot(
-            destination.grid_x - origin.grid_x,
-            destination.grid_y - origin.grid_y,
+            destination.grid_x - self.current_cell[0],
+            destination.grid_y - self.current_cell[1],
         )
         travel_minutes = max(60, int(math.ceil(distance * 45 / 5) * 5))
         absolute_minutes = (
@@ -396,11 +488,11 @@ class PlayerSession:
             + travel_minutes
         )
         day, minute_of_day = divmod(absolute_minutes, 24 * 60)
+        self.world.advance_travel_groups(travel_minutes)
         self.current_location_id = destination_id
-        self.local_map = self._local_maps.get(destination_id)
-        if self.local_map is None:
-            self.local_map = LocalMapBuilder().build(self.world, destination)
-            self._local_maps[destination_id] = self.local_map
+        self.current_cell = (int(destination.grid_x), int(destination.grid_y))
+        self.local_map = self._map_repository.get(*self.current_cell)
+        decorate_travel_groups(self.local_map, self.world)
         self._decorate_local_map_evidence()
         self.local_time = LocalTimeSimulation(
             self.local_map,
@@ -408,13 +500,18 @@ class PlayerSession:
             minute_of_day=minute_of_day,
             settle_npcs=True,
             world_seed=self.world.seed,
-            location_id=destination.id,
+            location_id=cell_key(*self.current_cell),
             biome=str(destination.biome),
+            full_map_vision=self.full_map_vision,
         )
+        self._restore_current_exploration()
         self._sync_discovered_evidence()
         return {
             "action": "travel",
-            "origin": {"id": origin.id, "name": origin.name},
+            "origin": {
+                "id": origin.id if origin is not None else cell_key(*origin_cell),
+                "name": origin.name if origin is not None else "荒野",
+            },
             "destination": {
                 "id": destination.id,
                 "name": destination.name,
@@ -477,11 +574,46 @@ class PlayerSession:
 
     def _finish_action(self, payload: dict, minutes: int) -> dict:
         payload["runtime"] = self.local_time.advance(minutes)
+        if self._advance_travel_time(minutes):
+            payload["local_map"] = self.local_map
+            payload["runtime"] = self.local_time.snapshot()
         payload["elapsed_minutes"] = minutes
         return payload
 
+    def _advance_travel_time(self, minutes: int) -> bool:
+        before = {
+            item.id for item in self.world.get_travel_groups_at(
+                *self.current_cell)}
+        self.world.advance_travel_groups(minutes)
+        after = {
+            item.id for item in self.world.get_travel_groups_at(
+                *self.current_cell)}
+        if before == after:
+            return False
+        previous = self.local_time
+        decorate_travel_groups(self.local_map, self.world)
+        self.local_map = copy.deepcopy(self.local_map)
+        self._map_repository.maps[cell_key(*self.current_cell)] = self.local_map
+        biome = str(self.world.geography.biomes[
+            self.current_cell[1], self.current_cell[0]])
+        refreshed = LocalTimeSimulation(
+            self.local_map,
+            day=previous.day,
+            minute_of_day=previous.minute_of_day,
+            settle_npcs=True,
+            world_seed=self.world.seed,
+            location_id=cell_key(*self.current_cell),
+            biome=biome,
+            player_position=(previous.player["x"], previous.player["y"]),
+            full_map_vision=self.full_map_vision,
+        )
+        refreshed.turn = previous.turn
+        refreshed._explored_cells = set(previous._explored_cells)
+        self.local_time = refreshed
+        return True
+
     def _location_payload(self) -> dict:
-        settlement = self.world.settlements[self.current_location_id]
+        settlement = self._current_settlement()
         return {
             "settlement": {
                 "id": settlement.id,
@@ -490,7 +622,8 @@ class PlayerSession:
                 "biome": settlement.biome,
                 "population": settlement.population,
                 "alive": settlement.alive,
-            },
+            } if settlement is not None else None,
+            "cell": {"x": self.current_cell[0], "y": self.current_cell[1]},
             "local_map": self.local_map,
             "runtime": self.local_time.snapshot(),
             "informants": self._informants_payload(),
@@ -538,8 +671,140 @@ class PlayerSession:
                 ],
             },
             "locations": locations,
+            "geographic_features": [
+                {
+                    "id": feature.id,
+                    "feature_type": feature.feature_type,
+                    "feature_type_name": feature.to_dict()[
+                        "feature_type_name"],
+                    "name": feature.name,
+                    "x": feature.anchor[0],
+                    "y": feature.anchor[1],
+                    "size": feature.size,
+                    "importance": feature.importance,
+                    "min_zoom": feature.min_zoom,
+                    "bounds": list(feature.bounds),
+                    "meaning_tags": list(feature.meaning_tags),
+                }
+                for feature in geography.features
+            ],
             "current_location_id": self.current_location_id,
+            "current_cell": {
+                "x": self.current_cell[0], "y": self.current_cell[1]},
+            "routes": [
+                {
+                    "id": route.id,
+                    "status": route.status,
+                    "path": [{"x": x, "y": y} for x, y in route.path],
+                }
+                for route in sorted(
+                    self.world.trade_routes.values(), key=lambda item: item.id)
+                if route.status == "active"
+            ],
         }
+
+    def _current_settlement(self):
+        if self.current_location_id is None:
+            return None
+        return self.world.settlements.get(self.current_location_id)
+
+    def _active_location_id(self) -> str:
+        return self.current_location_id or cell_key(*self.current_cell)
+
+    def _remember_current_exploration(self) -> None:
+        self._explored_by_cell[cell_key(*self.current_cell)] = set(
+            self.local_time._explored_cells)
+
+    def _restore_current_exploration(self) -> None:
+        self.local_time._explored_cells.update(
+            self._explored_by_cell.get(cell_key(*self.current_cell), set()))
+
+    def _move_to_adjacent_cell(self, exit_data: dict) -> dict:
+        direction = str(exit_data["direction"])
+        dx, dy = {
+            "north": (0, -1), "south": (0, 1),
+            "west": (-1, 0), "east": (1, 0),
+        }[direction]
+        target = (self.current_cell[0] + dx, self.current_cell[1] + dy)
+        geography = self.world.geography
+        if not (0 <= target[0] < geography.width
+                and 0 <= target[1] < geography.height):
+            raise PlayerActionError("这里已经是世界的边界。")
+        biome = str(geography.biomes[target[1], target[0]])
+        if biome in {"ocean", "lake"}:
+            raise PlayerActionError("没有船只，无法进入这片水域。")
+
+        self._remember_current_exploration()
+        next_map = self._map_repository.get(*target)
+        self.world.advance_travel_groups(1)
+        decorate_travel_groups(next_map, self.world)
+        fraction = float(exit_data["offset"]) / max(
+            1, int(exit_data["span"]) - 1)
+        if direction == "north":
+            desired = (round(fraction * (next_map["width"] - 1)),
+                       next_map["height"] - 1)
+        elif direction == "south":
+            desired = (round(fraction * (next_map["width"] - 1)), 0)
+        elif direction == "west":
+            desired = (next_map["width"] - 1,
+                       round(fraction * (next_map["height"] - 1)))
+        else:
+            desired = (0, round(fraction * (next_map["height"] - 1)))
+        spawn = self._nearest_walkable(next_map, desired)
+        settlement = self.world.get_settlement_at(*target)
+        source_day = self.local_time.day
+        source_minute = self.local_time.minute_of_day
+        self.current_cell = target
+        self.current_location_id = settlement.id if settlement is not None else None
+        self.local_map = next_map
+        self._decorate_local_map_evidence()
+        self.local_time = LocalTimeSimulation(
+            self.local_map,
+            day=source_day,
+            minute_of_day=source_minute,
+            settle_npcs=True,
+            world_seed=self.world.seed,
+            location_id=cell_key(*target),
+            biome=biome,
+            player_position=spawn,
+            full_map_vision=self.full_map_vision,
+        )
+        self._restore_current_exploration()
+        runtime = self.local_time.advance(1)
+        self._sync_discovered_evidence()
+        return {
+            "action": "move",
+            "moved": True,
+            "changed_map": True,
+            "elapsed_minutes": 1,
+            "runtime": runtime,
+            "location": self._location_payload(),
+            "world_map": self._world_map_payload(),
+        }
+
+    @staticmethod
+    def _nearest_walkable(local_map: dict,
+                          desired: tuple[int, int]) -> tuple[int, int]:
+        width, height = local_map["width"], local_map["height"]
+        blocking = set(local_map["blocking_tiles"])
+        occupied = {
+            (item["x"], item["y"]) for item in local_map["entities"]
+            if item.get("blocks_movement", True)
+        }
+        for radius in range(max(width, height)):
+            candidates = []
+            for y in range(max(0, desired[1] - radius),
+                           min(height, desired[1] + radius + 1)):
+                for x in range(max(0, desired[0] - radius),
+                               min(width, desired[0] + radius + 1)):
+                    if abs(x - desired[0]) + abs(y - desired[1]) != radius:
+                        continue
+                    if ((x, y) not in occupied
+                            and local_map["tiles"][y * width + x] not in blocking):
+                        candidates.append((x, y))
+            if candidates:
+                return sorted(candidates, key=lambda item: (item[1], item[0]))[0]
+        raise PlayerActionError("相邻地图没有可进入的位置。")
 
     def _starting_settlement_id(self) -> str:
         candidates = [
@@ -560,7 +825,7 @@ class PlayerSession:
         evidence = self.world.evidence.get(evidence_id)
         if (evidence is None
                 or evidence.id not in self.knowledge.discovered_evidence_ids
-                or evidence.location_id != self.current_location_id
+                or evidence.location_id != self._active_location_id()
                 or evidence.state == "destroyed"
                 or evidence.evidence_type == "oral"):
             raise PlayerActionError("这里找不到这件证物。")
@@ -595,7 +860,7 @@ class PlayerSession:
                     value.container_id or "", value.storage_position, value.id),
             )
             if item.id in self.knowledge.discovered_evidence_ids
-            and item.location_id == self.current_location_id
+            and item.location_id == self._active_location_id()
             and item.state != "destroyed"
             and item.evidence_type != "oral"
         ]
@@ -604,7 +869,7 @@ class PlayerSession:
         target = next(
             (item for item in build_evidence_targets(
                 self.world.evidence.values(), self.world.storage_sites,
-                self.current_location_id)
+                self._active_location_id())
              if evidence.id in item["evidence_ids"]),
             None,
         )

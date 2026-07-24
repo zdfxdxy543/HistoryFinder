@@ -1,6 +1,6 @@
 export type MapEntity = {
   id: string;
-  kind: "evidence" | "container" | "informant" | "resident";
+  kind: "evidence" | "container" | "informant" | "resident" | "landmark" | "camp" | "caravan" | "traveler" | "trace" | "wildlife";
   x: number;
   y: number;
   name: string;
@@ -23,6 +23,32 @@ export type MapEntity = {
   blocks_movement?: boolean;
   can_read?: boolean;
   quick_read?: boolean;
+  dynamic?: boolean;
+  travel_group_id?: string;
+  route_id?: string;
+  cargo?: string[];
+  destination_name?: string;
+  religion_name?: string;
+  guard_count?: number;
+  historical_site_id?: string;
+  site_state?: "active" | "damaged" | "abandoned" | "ruined" | "restored";
+  source_event_ids?: string[];
+  wear_level?: "light" | "moderate" | "heavy";
+  wear_name?: string;
+  repair_type?: "iron_strap" | "replacement_board" | "rope_binding" | "fresh_paint";
+  repair_name?: string;
+  repair_error_type?: "none" | "misspelling" | "distance_error" | "missing_character" | "illegible_text" | "illegible_distance";
+  repair_error_name?: string;
+};
+
+export type MapDecoration = {
+  id: string;
+  kind: "natural";
+  subtype: string;
+  x: number;
+  y: number;
+  variant: number;
+  scale: number;
 };
 
 export type LocalBuilding = {
@@ -31,10 +57,15 @@ export type LocalBuilding = {
   building_type: string;
   bounds: number[];
   door: { x: number; y: number };
+  condition: "intact" | "damaged" | "ruined";
+  infrastructure_type: string;
+  infrastructure_level: number;
+  historical_site_id?: string;
 };
 
 export type LocalMap = {
-  site_type: "settlement" | "ruin";
+  site_type: "settlement" | "ruin" | "wilderness";
+  cell: { x: number; y: number };
   width: number;
   height: number;
   profile: {
@@ -46,14 +77,23 @@ export type LocalMap = {
     entrances: string[];
     landscape_type: string;
     landscape_name: string;
+    feature_names: string[];
   };
   tiles: number[];
   blocking_tiles: number[];
   player_start: { x: number; y: number };
   entities: MapEntity[];
+  decorations: MapDecoration[];
   discovered_evidence: MapEntity[];
   buildings: LocalBuilding[];
-  zones: Array<{ id: string; name: string; bounds: number[]; show_label?: boolean }>;
+  zones: Array<{
+    id: string;
+    name: string;
+    bounds: number[];
+    show_label?: boolean;
+    zone_type?: string;
+    historical_site_id?: string;
+  }>;
 };
 
 export type WorldLocation = {
@@ -72,6 +112,20 @@ export type WorldPolity = {
   name: string;
 };
 
+export type GeographicFeature = {
+  id: string;
+  feature_type: "river" | "lake" | "mountain" | "plains" | "forest" | "desert" | "tundra";
+  feature_type_name: string;
+  name: string;
+  x: number;
+  y: number;
+  size: number;
+  importance: number;
+  min_zoom: number;
+  bounds: number[];
+  meaning_tags: string[];
+};
+
 export type WorldMapState = {
   width: number;
   height: number;
@@ -83,12 +137,19 @@ export type WorldMapState = {
     polities: WorldPolity[];
   };
   locations: WorldLocation[];
-  current_location_id: string;
+  geographic_features: GeographicFeature[];
+  current_location_id: string | null;
+  current_cell: { x: number; y: number };
+  routes: Array<{
+    id: string;
+    status: "active" | "declining" | "abandoned" | "destroyed";
+    path: Array<{ x: number; y: number }>;
+  }>;
 };
 
 export type NpcRuntime = {
   id: string;
-  kind: "informant" | "resident";
+  kind: "informant" | "resident" | "caravan" | "traveler" | "wildlife";
   x: number;
   y: number;
   activity: string;
@@ -101,6 +162,7 @@ export type RuntimeState = {
   time_label: string;
   period_name: string;
   turn: number;
+  full_map_vision: boolean;
   player: { x: number; y: number };
   environment: {
     daylight: "dawn" | "day" | "dusk" | "night" | "late_night";
@@ -113,6 +175,13 @@ export type RuntimeState = {
   visible_tiles: Array<{ x: number; y: number }>;
   explored_tiles: Array<{ x: number; y: number }>;
   npcs: NpcRuntime[];
+};
+
+export type CheatState = {
+  full_map_vision: {
+    unlocked: boolean;
+    enabled: boolean;
+  };
 };
 
 export type Informant = {
@@ -149,12 +218,14 @@ export type PlayerState = {
     biome: string;
     population: number;
     alive: boolean;
-  };
+  } | null;
+  cell?: { x: number; y: number };
   local_map: LocalMap;
   runtime: RuntimeState;
   world_map: WorldMapState;
   informants: Informant[];
   journal: Journal;
+  cheats: CheatState;
 };
 
 export type ActionResult = {
@@ -173,6 +244,7 @@ export type ActionResult = {
   learned_claims?: Array<Record<string, unknown>>;
   runtime?: RuntimeState;
   moved?: boolean;
+  changed_map?: boolean;
   minutes?: number;
   elapsed_minutes?: number;
   location?: Pick<PlayerState, "settlement" | "local_map" | "runtime" | "informants">;
@@ -181,6 +253,8 @@ export type ActionResult = {
   destination?: { id: string; name: string; site_type: "settlement" | "ruin" };
   container?: Record<string, unknown>;
   discovered_evidence?: MapEntity[];
+  subject?: Record<string, unknown>;
   local_map?: LocalMap;
   newly_discovered_count?: number;
+  cheats?: CheatState;
 };

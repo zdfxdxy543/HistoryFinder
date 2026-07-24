@@ -135,6 +135,7 @@ RECORD_TYPES = {
     "foundation_stone": "inscription",
     "treaty_pillar": "treaty_inscription",
     "ruler_tomb": "epitaph",
+    "grave_marker": "epitaph",
     "literary_manuscript": "literary_work",
     "literary_commentary": "commentary",
     "traveling_literary_copy": "literary_copy",
@@ -143,6 +144,13 @@ RECORD_TYPES = {
     "research_notes": "research_notes",
     "popular_recitation": "recitation",
     "adapted_recitation": "recitation",
+    "religious_text": "liturgy",
+    "ritual_calendar": "ritual_calendar",
+    "reformed_liturgy": "liturgy",
+    "reform_decree": "decree",
+    "revised_hymn": "recitation",
+    "prohibition_edict": "decree",
+    "forbidden_hymn": "oral_tradition",
 }
 
 
@@ -228,6 +236,7 @@ class RecordGenerator:
             "scholarly": "students_and_craftspeople",
             "author": "readers_and_listeners",
             "eyewitness": "local_community",
+            "ritual_office": "ritual_participants",
             "folk": "local_community",
         }.get(perspective, "public")
         secrecy = 0.35 if subtype in {"private_letter", "research_notes"} else 0.0
@@ -252,7 +261,7 @@ class RecordGenerator:
     def _perspective(self, subtype: str, evidence_type: str) -> str:
         if evidence_type == "oral":
             return "folk"
-        if subtype in {"rebel_manifesto"}:
+        if subtype in {"rebel_manifesto", "forbidden_hymn"}:
             return "opposition"
         if subtype in {"trade_ledger", "tax_record", "relief_receipt"}:
             return "merchant"
@@ -263,15 +272,22 @@ class RecordGenerator:
             return "author"
         if subtype in {"survivor_account", "private_letter"}:
             return "eyewitness"
+        if subtype in {"religious_text", "ritual_calendar",
+                       "reformed_liturgy", "reform_decree"}:
+            return "ritual_office"
         return "official"
 
     def _select_author(self, event, perspective: str, persons: dict) -> str | None:
+        if event.event_type == "burial":
+            commissioner_id = event.details.get("commissioner_person_id")
+            return commissioner_id if commissioner_id in persons else None
         preferred_roles = {
             "official": {"ruler", "diplomat", "scribe"},
             "opposition": {"rebel_leader"},
             "scholarly": {"scholar"},
             "author": {"writer", "scribe"},
             "eyewitness": {"general", "scribe"},
+            "ritual_office": {"priest", "scribe"},
         }.get(perspective, set())
         candidates = [
             persons[person_id] for person_id in event.person_ids
@@ -541,6 +557,81 @@ class RecordGenerator:
             return (
                 "opened_trade_route", partner,
                 f"账簿声称，{subject}曾与{partner}保持定期货物往来。",
+            )
+        if event.event_type == "festival":
+            religion_name = details.get("religion_name", "当地传统")
+            profile = details.get("religion_profile") or {}
+            ritual = profile.get(
+                "primary_ritual", details.get("ritual", "公共祭仪"))
+            response = profile.get("congregation_response", "共同回应")
+            offering = profile.get("offering", "仪式供物")
+            return (
+                "performed_ritual", religion_name,
+                f"这份材料声称，{subject}曾按{religion_name}举行{ritual}，"
+                f"列席者以{response}作答并献上{offering}。",
+            )
+        if event.event_type == "omen":
+            profile = details.get("religion_profile") or {}
+            focus = profile.get("sacred_focus")
+            interpretation = (f"；祭仪记录把它与{focus}联系起来"
+                              if focus else "")
+            return (
+                "observed_omen", event.title,
+                f"这份记录描述了{event.title}{interpretation}，"
+                "观测部分与解释部分分开书写。",
+            )
+        if event.event_type == "religious_reform":
+            old_name = details.get("parent_religion_name", "旧有礼法")
+            new_name = details.get("religion_name", "新仪传统")
+            parent_profile = details.get("parent_religion_profile") or {}
+            profile = details.get("religion_profile") or {}
+            changed = details.get("changed_dimensions") or []
+            field = changed[0] if changed else "ritual_steps"
+            labels = {
+                "sacred_focus": "神圣对象", "ethical_duty": "共同义务",
+                "calendar_anchor": "祭历基准", "offering": "供物",
+                "officiant": "主持者", "congregation_response": "答词",
+                "ritual_steps": "仪式次序", "sacred_symbol": "公共符号",
+                "taboo": "禁忌",
+            }
+            before = parent_profile.get(field, "旧本所记内容")
+            after = profile.get(field, "新本所记内容")
+            if isinstance(before, list):
+                before = "、".join(before)
+            if isinstance(after, list):
+                after = "、".join(after)
+            change = f"{labels.get(field, field)}从{before}改为{after}"
+            if perspective in {"opposition", "folk"}:
+                statement = (
+                    f"地方流传的版本声称，{new_name}将{old_name}的{change}，"
+                    "但这项改动未经所有列席者同意。")
+            else:
+                statement = (
+                    f"仪式文书声称，{new_name}整理{old_name}时把{change}。")
+            return "religious_reform", new_name, statement
+        if event.event_type == "religious_conflict":
+            minority = details.get("minority_religion_name", "旧有祭仪")
+            profile = details.get("minority_religion_profile") or {}
+            symbol = profile.get("sacred_symbol", "公开符号")
+            offering = profile.get("offering", "仪式用品")
+            if perspective in {"opposition", "folk"}:
+                statement = (
+                    f"地方口述声称，{minority}所用的{symbol}被移走，"
+                    f"作为供物的{offering}也被收存。")
+            else:
+                statement = (
+                    f"官方告示声称，限制{minority}公开陈列{symbol}"
+                    "是为了维持公共仪式的秩序。")
+            return "religious_practice_restricted", minority, statement
+        if event.event_type == "burial":
+            person_name = details.get("person_name", "墓主人")
+            death_year = details.get("death_year", event.year)
+            roles = details.get("role_names", [])
+            role_text = "、".join(roles) if roles else "未列专门身份"
+            return (
+                "person_buried", person_name,
+                f"墓碑声称，{person_name}卒于{death_year}年，"
+                f"碑上所列身份为{role_text}。",
             )
 
         prefix = {

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 from collections import deque
 
+from game.local_map import TILE_FENCE, TILE_WATER
+
 
 DAYLIGHT_NAMES = {
     "dawn": "黎明",
@@ -56,21 +58,23 @@ ACTIVITY_NAMES = {
     "midday": "正在午间外出",
     "going_home": "正在回家",
     "resting": "正在家中休息",
+    "foraging": "正在觅食",
+    "traveling": "正在赶路",
 }
 
 
 WORKPLACE_TYPES = {
-    "scholar": ("archive", "academy"),
+    "scholar": ("library", "archive"),
     "scribe": ("archive", "hall"),
     "elder": ("hall",),
-    "merchant": ("market",),
+    "merchant": ("great_market", "market"),
     "artisan": ("workshop",),
     "farmer": ("field", "mill"),
     "weaver": ("workshop",),
-    "porter": ("market", "dock", "granary"),
+    "porter": ("great_market", "market", "dock", "granary"),
     "baker": ("bakery",),
-    "vendor": ("market",),
-    "water_carrier": ("cistern", "well", "market"),
+    "vendor": ("great_market", "market"),
+    "water_carrier": ("aqueduct", "cistern", "well", "market"),
     "carpenter": ("workshop", "lumberyard"),
     "inn_worker": ("inn",),
     "laborer": ("granary", "quarry", "lumberyard", "dock"),
@@ -78,7 +82,8 @@ WORKPLACE_TYPES = {
 
 
 BREAK_PLACE_TYPES = (
-    "market", "well", "inn", "hall", "temple", "academy", "dock",
+    "great_market", "market", "well", "inn", "hall", "temple",
+    "library", "palace", "dock",
 )
 
 
@@ -90,19 +95,26 @@ class LocalTimeSimulation:
     def __init__(self, local_map: dict, day: int = 1,
                  minute_of_day: int = 6 * 60 + 55,
                  settle_npcs: bool = False, *, world_seed: int = 0,
-                 location_id: str = "local", biome: str = "plains"):
+                 location_id: str = "local", biome: str = "plains",
+                 player_position: tuple[int, int] | None = None,
+                 full_map_vision: bool = False):
         self.local_map = local_map
         self.day = max(1, day)
         self.minute_of_day = minute_of_day % (24 * 60)
         self.world_seed = world_seed
         self.location_id = location_id
         self.biome = biome
+        self.full_map_vision = full_map_vision
         self.turn = 0
-        self.player = dict(local_map["player_start"])
+        self.player = (
+            {"x": player_position[0], "y": player_position[1]}
+            if player_position is not None else dict(local_map["player_start"])
+        )
         self._static_positions = {
             (item["x"], item["y"])
             for item in local_map["entities"]
-            if (item["kind"] in {"evidence", "container"}
+            if (item["kind"] not in {
+                "informant", "resident", "caravan", "traveler", "wildlife"}
                 and item.get("blocks_movement", True))
         }
         self._reachable_cells = self._reachable_from_player_start()
@@ -116,8 +128,28 @@ class LocalTimeSimulation:
         if abs(dx) + abs(dy) != 1:
             raise ValueError("移动必须是相邻的一个格子。")
         target = (self.player["x"] + dx, self.player["y"] + dy)
+        if not self._in_bounds(target):
+            direction = (
+                "west" if target[0] < 0 else
+                "east" if target[0] >= self.local_map["width"] else
+                "north" if target[1] < 0 else "south"
+            )
+            offset = self.player["y"] if dx else self.player["x"]
+            span = self.local_map["height"] if dx else self.local_map["width"]
+            return {
+                "moved": False,
+                "exit_map": {
+                    "direction": direction,
+                    "offset": offset,
+                    "span": span,
+                },
+                "runtime": self.snapshot(),
+            }
         occupied = {
-            (npc["x"], npc["y"]) for npc in self._npcs.values()}
+            (npc["x"], npc["y"])
+            for npc in self._npcs.values()
+            if npc["kind"] != "wildlife"
+        }
         if (not self._is_walkable(target) or target in occupied
                 or target in self._static_positions):
             return {"moved": False, "runtime": self.snapshot()}
@@ -140,14 +172,23 @@ class LocalTimeSimulation:
     def snapshot(self) -> dict:
         hour, minute = divmod(self.minute_of_day, 60)
         environment = self._environment_snapshot()
-        visible_cells = self._visible_cells(environment["visibility_radius"])
-        self._explored_cells.update(visible_cells)
+        natural_visible = self._visible_cells(environment["visibility_radius"])
+        self._explored_cells.update(natural_visible)
+        visible_cells = (
+            {
+                (x, y)
+                for y in range(self.local_map["height"])
+                for x in range(self.local_map["width"])
+            }
+            if self.full_map_vision else natural_visible
+        )
         return {
             "day": self.day,
             "minute_of_day": self.minute_of_day,
             "time_label": f"{hour:02d}:{minute:02d}",
             "period_name": self._period_name(hour),
             "turn": self.turn,
+            "full_map_vision": self.full_map_vision,
             "player": dict(self.player),
             "environment": environment,
             "visible_tiles": self._sorted_cells(visible_cells),
@@ -230,7 +271,10 @@ class LocalTimeSimulation:
     def _blocks_sight(self, position: tuple[int, int]) -> bool:
         x, y = position
         tile = self.local_map["tiles"][y * self.local_map["width"] + x]
-        return tile in self.local_map["blocking_tiles"]
+        return (
+            tile in self.local_map["blocking_tiles"]
+            and tile not in {TILE_WATER, TILE_FENCE}
+        )
 
     @staticmethod
     def _grid_line(origin: tuple[int, int],
@@ -273,19 +317,55 @@ class LocalTimeSimulation:
         assigned_breaks: set[tuple[int, int]] = set()
         npcs = [
             item for item in self.local_map["entities"]
-            if item["kind"] in {"informant", "resident"}
+            if item["kind"] in {
+                "informant", "resident", "caravan", "traveler", "wildlife"}
         ]
         for index, entity in enumerate(sorted(npcs, key=lambda item: item["id"])):
-            home = self._assign_target(homes, assigned_homes, index)
-            workplaces = self._positions_for_places(
-                WORKPLACE_TYPES.get(entity["role"], BREAK_PLACE_TYPES))
-            work = self._assign_target(
-                workplaces or fallback,
-                assigned_work,
-                index,
-            )
-            midday = self._assign_target(
-                breaks, assigned_breaks, index)
+            travel_path = [
+                (int(item[0]), int(item[1]))
+                for item in entity.get("travel_path", [])
+                if (self._in_bounds((int(item[0]), int(item[1])))
+                    and self._is_walkable((int(item[0]), int(item[1]))))
+            ]
+            travel_mode = str(entity.get("travel_clock_mode", ""))
+            travel_cursor = 0
+            travel_progress = int(entity.get("travel_progress", 0))
+            travel_duration = max(1, int(entity.get("travel_duration", 180)))
+            if travel_path and travel_mode == "loop":
+                cycle = max(1, 2 * len(travel_path) - 2)
+                absolute_minute = (self.day - 1) * 24 * 60 + self.minute_of_day
+                travel_cursor = (
+                    absolute_minute + int(entity.get("travel_offset", 0))) % cycle
+                path_index = (travel_cursor if travel_cursor < len(travel_path)
+                              else cycle - travel_cursor)
+                home = travel_path[path_index]
+                work = travel_path[-1]
+                midday = travel_path[len(travel_path) // 2]
+            elif travel_path and travel_mode == "world_progress":
+                path_index = min(
+                    len(travel_path) - 1,
+                    int(travel_progress / travel_duration
+                        * (len(travel_path) - 1)),
+                )
+                home = travel_path[path_index]
+                work = travel_path[-1]
+                midday = travel_path[len(travel_path) // 2]
+            elif entity["kind"] == "wildlife":
+                home = (entity["x"], entity["y"])
+                roam = self._wildlife_roam_positions(home, entity["id"])
+                work = roam[0]
+                midday = roam[1] if len(roam) > 1 else home
+            else:
+                home = self._assign_target(homes, assigned_homes, index)
+                workplaces = self._positions_for_places(
+                    WORKPLACE_TYPES.get(entity["role"], BREAK_PLACE_TYPES))
+                work = self._assign_target(
+                    workplaces or fallback,
+                    assigned_work,
+                    index,
+                )
+                midday = self._assign_target(
+                    breaks, assigned_breaks, index)
             entity["x"], entity["y"] = home
             self._npcs[entity["id"]] = {
                 "id": entity["id"],
@@ -296,10 +376,31 @@ class LocalTimeSimulation:
                 "work": work,
                 "midday": midday,
                 "schedule_offset": self._schedule_offset(entity["id"]),
-                "activity": "resting",
+                "activity": "traveling" if travel_path else "resting",
                 "path_target": None,
                 "path": [],
+                "travel_path": travel_path,
+                "travel_mode": travel_mode,
+                "travel_cursor": travel_cursor,
+                "travel_progress": travel_progress,
+                "travel_duration": travel_duration,
             }
+
+    def _wildlife_roam_positions(
+            self, origin: tuple[int, int], entity_id: str
+    ) -> list[tuple[int, int]]:
+        candidates = [
+            position for position in self._reachable_cells
+            if (4 <= abs(position[0] - origin[0])
+                + abs(position[1] - origin[1]) <= 12
+                and position not in self._static_positions
+                and self._is_walkable(position))
+        ]
+        candidates.sort(key=lambda position: hashlib.sha256(
+            f"wildlife-roam|{entity_id}|{position[0]}|{position[1]}".encode(
+                "utf-8")
+        ).digest())
+        return candidates[:2] or [origin]
 
     def _home_positions(self) -> list[tuple[int, int]]:
         groups = []
@@ -421,6 +522,8 @@ class LocalTimeSimulation:
             ordered = ordered[rotation:] + ordered[:rotation]
         blocked = self._static_positions | {
             (self.player["x"], self.player["y"])}
+        for npc in ordered:
+            self._advance_traveler_clock(npc)
         schedules = {
             npc["id"]: self._schedule_target(npc) for npc in ordered}
         stationary_ids = {
@@ -530,6 +633,23 @@ class LocalTimeSimulation:
         return origin
 
     def _schedule_target(self, npc: dict) -> tuple[tuple[int, int], str]:
+        if npc.get("travel_path"):
+            path = npc["travel_path"]
+            if npc["travel_mode"] == "loop":
+                cycle = max(1, 2 * len(path) - 2)
+                cursor = npc["travel_cursor"] % cycle
+                index = cursor if cursor < len(path) else cycle - cursor
+            else:
+                index = min(
+                    len(path) - 1,
+                    int(npc["travel_progress"] / npc["travel_duration"]
+                        * (len(path) - 1)),
+                )
+            return path[index], "traveling"
+        if npc["kind"] == "wildlife":
+            targets = (npc["home"], npc["work"], npc["midday"])
+            phase = (self.turn // 12 + npc["schedule_offset"]) % len(targets)
+            return targets[phase], "foraging"
         local_minute = (
             self.minute_of_day - npc.get("schedule_offset", 0)) % (24 * 60)
         if local_minute < 7 * 60:
@@ -552,6 +672,17 @@ class LocalTimeSimulation:
             elif activity == "working":
                 activity = "commuting"
         return target, activity
+
+    @staticmethod
+    def _advance_traveler_clock(npc: dict) -> None:
+        if not npc.get("travel_path"):
+            return
+        if npc["travel_mode"] == "loop":
+            cycle = max(1, 2 * len(npc["travel_path"]) - 2)
+            npc["travel_cursor"] = (npc["travel_cursor"] + 1) % cycle
+        elif npc["travel_mode"] == "world_progress":
+            npc["travel_progress"] = min(
+                npc["travel_duration"], npc["travel_progress"] + 1)
 
     @staticmethod
     def _schedule_offset(npc_id: str) -> int:
@@ -598,6 +729,12 @@ class LocalTimeSimulation:
             return False
         tile = self.local_map["tiles"][y * width + x]
         return tile not in self.local_map["blocking_tiles"]
+
+    def _in_bounds(self, position: tuple[int, int]) -> bool:
+        return (
+            0 <= position[0] < self.local_map["width"]
+            and 0 <= position[1] < self.local_map["height"]
+        )
 
     def _reachable_from_player_start(self) -> set[tuple[int, int]]:
         start = (

@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import copy as copy_module
 
+from simulation.literary_generation import compose_grounded_literature
+from simulation.religion import describe_profile_change
+
 
 BUILDING_NAMES = {
     "temple": "神殿",
@@ -24,6 +27,7 @@ PERSON_ROLE_NAMES = {
     "scholar": "研究者",
     "writer": "作者",
     "heir": "继承人",
+    "priest": "仪式保管人",
 }
 
 
@@ -35,6 +39,7 @@ PUBLIC_INSCRIPTION_SUBTYPES = frozenset({
     "treaty_tablet",
     "treaty_pillar",
     "ruler_tomb",
+    "grave_marker",
 })
 
 
@@ -111,6 +116,247 @@ def _year_label(year: int | str | None) -> str:
     if year is None:
         return "年份不详"
     return f"{year}年"
+
+
+def _religion_profile(details: dict, key: str = "religion_profile") -> dict:
+    profile = dict(details.get(key) or {})
+    name_key = {
+        "parent_religion_profile": "parent_religion_name",
+        "dominant_religion_profile": "dominant_religion_name",
+        "minority_religion_profile": "minority_religion_name",
+    }.get(key, "religion_name")
+    profile.setdefault("name", details.get(name_key, "本地传统"))
+    profile.setdefault("doctrine", details.get("doctrine", "共同维护旧有誓约"))
+    profile.setdefault("sacred_symbol", details.get("sacred_symbol", "公共仪式符号"))
+    profile.setdefault("primary_ritual", details.get("ritual", "举行公共祭仪"))
+    profile.setdefault("sacred_focus", profile["doctrine"])
+    profile.setdefault("ethical_duty", "保存共同体的见证")
+    profile.setdefault("calendar_anchor", "本地历法标记日")
+    profile.setdefault("offering", "清水")
+    profile.setdefault("officiant", "仪式保管人")
+    profile.setdefault("congregation_response", "重复领诵者的末句")
+    if not profile.get("ritual_steps"):
+        profile["ritual_steps"] = [profile["primary_ritual"]]
+    else:
+        profile["ritual_steps"] = list(profile["ritual_steps"])
+    return profile
+
+
+def _liturgy_passages(details: dict) -> list[dict]:
+    profile = _religion_profile(details)
+    passages = [
+        _passage("heading", f"{profile['name']}仪式诵次"),
+        _passage(
+            "body",
+            f"{profile['officiant']}面向{profile['sacred_symbol']}宣告："
+            f"{profile['sacred_focus']}使列席者记得{profile['ethical_duty']}。",
+        ),
+    ]
+    for index, step in enumerate(profile["ritual_steps"], 1):
+        passages.append(_passage("body", f"第{index}次：{step}。"))
+    passages.extend([
+        _passage(
+            "body",
+            f"供物记为{profile['offering']}；众人随后"
+            f"{profile['congregation_response']}。",
+        ),
+        _passage(
+            "closing",
+            f"实际举行日期须按{profile['calendar_anchor']}补记在卷末。",
+        ),
+    ])
+    return passages
+
+
+def _hymn_passages(details: dict, subtype: str) -> list[dict]:
+    key = ("minority_religion_profile" if subtype == "forbidden_hymn"
+           else "religion_profile")
+    profile = _religion_profile(details, key)
+    title = {
+        "hymn": f"献给{profile['sacred_focus']}的答歌",
+        "revised_hymn": f"{profile['name']}新答歌",
+        "forbidden_hymn": f"未署名的{profile['sacred_symbol']}歌",
+    }[subtype]
+    passages = [
+        _passage("heading", title),
+        _passage(
+            "body",
+            f"领句：我们携{profile['offering']}来到"
+            f"{profile['sacred_symbol']}之前。",
+        ),
+        _passage(
+            "body",
+            f"答句：{profile['congregation_response']}，"
+            f"使人不忘{profile['ethical_duty']}。",
+        ),
+    ]
+    for step in profile["ritual_steps"][:2]:
+        passages.append(_passage("body", f"行句：{step}。"))
+    if subtype == "revised_hymn":
+        parent = _religion_profile(details, "parent_religion_profile")
+        passages.append(_passage(
+            "body",
+            f"校句：旧答词提到{parent['sacred_focus']}，"
+            f"本卷改记为{profile['sacred_focus']}。",
+        ))
+    closing = ("传唱者没有留下姓名，也没有注明禁令后的抄写地点。"
+               if subtype == "forbidden_hymn" else
+               f"末句后由{profile['officiant']}记下实际回应人数。")
+    passages.append(_passage("closing", closing))
+    return passages
+
+
+def _calendar_passages(details: dict, year: int, seed: int,
+                       document_key: str) -> list[dict]:
+    profile = _religion_profile(details)
+    rounds = ("初次集会", "季中集会", "季末集会")
+    places = ("公共门廊", "水源旁", "旧界石内侧", "集市散场处")
+    passages = [_passage("heading", f"{profile['name']}第{year}年祭历")]
+    for index, round_name in enumerate(rounds):
+        place = _stable_choice(
+            seed, document_key, f"calendar_place:{index}", list(places))
+        step = profile["ritual_steps"][
+            index % len(profile["ritual_steps"])]
+        passages.append(_passage(
+            "body",
+            f"{round_name}：以{profile['calendar_anchor']}为基准，"
+            f"在{place}由{profile['officiant']}{step}；"
+            f"应备{profile['offering']}。",
+        ))
+    contingency = _stable_choice(
+        seed, document_key, "calendar_contingency",
+        ["洪水", "道路封闭", "主持者缺席", "供物未能送达"])
+    passages.append(_passage(
+        "closing",
+        f"若因{contingency}改期，记录实际日期并说明它与"
+        f"{profile['calendar_anchor']}相差的日数。",
+    ))
+    return passages
+
+
+def _reform_passages(details: dict, decree: bool = False) -> list[dict]:
+    parent = _religion_profile(details, "parent_religion_profile")
+    profile = _religion_profile(details)
+    changed = details.get("changed_dimensions") or [
+        field for field in (
+            "sacred_focus", "ethical_duty", "calendar_anchor", "offering",
+            "officiant", "congregation_response", "ritual_steps",
+            "sacred_symbol", "taboo")
+        if parent.get(field) != profile.get(field)
+    ]
+    heading = (f"{profile['name']}施行告示" if decree
+               else f"{profile['name']}校订仪次")
+    passages = [
+        _passage("heading", heading),
+        _passage(
+            "body",
+            f"校订者注明缘由：{details.get('reform_reason', '旧本次序不一')}。"
+            f"对照本以{parent['name']}为旧本，以{profile['name']}为新本。",
+        ),
+    ]
+    for field in changed:
+        passages.append(_passage(
+            "body", describe_profile_change(
+                field, parent.get(field), profile.get(field)) + "。"))
+    if decree:
+        passages.append(_passage(
+            "body",
+            f"自第{details.get('effective_year', '本')}年下一次"
+            f"{profile['calendar_anchor']}起，由{profile['officiant']}按新本主持；"
+            f"旧本交公共经库与{details.get('reformer_name') or '公共书记'}共同核签。",
+        ))
+    passages.append(_passage(
+        "closing",
+        f"新旧两本在{profile['sacred_symbol']}印记下并存，未列出的异文不作废。",
+    ))
+    return passages
+
+
+def _prohibition_passages(details: dict, seed: int,
+                          document_key: str) -> list[dict]:
+    dominant = _religion_profile(details, "dominant_religion_profile")
+    minority = _religion_profile(details, "minority_religion_profile")
+    place = _stable_choice(seed, document_key, "prohibition_place", [
+        "城门内侧", "公共水源旁", "集市通道", "旧界石周围"])
+    enforcement = _stable_choice(seed, document_key, "prohibition_method", [
+        "登记主持者姓名", "封存供物", "移走公开符号", "查验集会日期"])
+    restricted_step = (minority["ritual_steps"][0]
+                       if minority["ritual_steps"] else
+                       minority["primary_ritual"])
+    return [
+        _passage("heading", f"关于{minority['name']}公共仪式的限制令"),
+        _passage(
+            "body",
+            f"告示要求{place}的集会改由{dominant['officiant']}核准，"
+            f"不得继续“{restricted_step}”，也不得公开陈列"
+            f"{minority['sacred_symbol']}。",
+        ),
+        _passage(
+            "body",
+            f"执行方式记为{enforcement}；收存物包括"
+            f"{minority['offering']}和带有{minority['sacred_symbol']}的用品。",
+        ),
+        _passage(
+            "closing",
+            f"落款采用{dominant['name']}的印记，施行期限与返还日期均未填。",
+        ),
+    ]
+
+
+def _grave_marker_passages(details: dict) -> list[dict]:
+    name = details.get("person_name", "墓主人")
+    birth_year = details.get("birth_year")
+    death_year = details.get("death_year")
+    age = details.get("age")
+    settlement = details.get("home_settlement_name", "此地")
+    roles = details.get("role_names", [])
+    commissioner = details.get("commissioner_name") or "当地共同体"
+    profile = _religion_profile(details)
+    sources = [
+        source for source in details.get("life_sources", [])
+        if isinstance(source, dict)
+    ]
+    lifespan = (
+        f"生于{_year_label(birth_year)}，卒于{_year_label(death_year)}"
+        if birth_year is not None else f"卒于{_year_label(death_year)}")
+    if age is not None:
+        lifespan += f"，享年{age}岁"
+    passages = [
+        _passage("heading", f"{name}之墓"),
+        _passage("body", lifespan + "。"),
+        _passage("body", f"{name}以{settlement}为故乡。"),
+        _passage(
+            "body",
+            f"墓园簿将此碑登记为"
+            f"{details.get('burial_registration', '未编号墓葬')}。",
+        ),
+    ]
+    if roles:
+        passages.append(_passage(
+            "body", f"碑上列其生前身份为{'、'.join(roles)}。"))
+    else:
+        passages.append(_passage(
+            "body", "碑上没有为墓主人列出官职或专门身份。"))
+    marker_name = {
+        "memorial_tomb": "纪念墓碑",
+        "family_tombstone": "家族墓碑",
+        "grave_marker": "独立墓碑",
+    }.get(details.get("marker_type"), "墓碑")
+    passages.append(_passage(
+        "body", f"墓园登记的立碑形制为{marker_name}。"))
+    for source in sources:
+        passages.append(_passage(
+            "body", source.get("summary", source.get("title", ""))))
+    passages.append(_passage(
+        "body",
+        f"依{profile['name']}的葬仪，以{profile['sacred_symbol']}为记，"
+        f"并置{profile['offering']}。",
+    ))
+    passages.append(_passage(
+        "closing",
+        f"{commissioner}于{_year_label(details.get('burial_year', death_year))}立石。",
+    ))
+    return passages
 
 
 def _generic_passages(event, subtype: str, seed: int,
@@ -457,6 +703,7 @@ def build_written_content(event, subtype: str, seed: int,
     details = event.details
     year = event.year
     passages: list[dict]
+    composition_plan: dict | None = None
 
     if base_subtype == "foundation_stone":
         founder = details.get("founder", "诸位立约者")
@@ -547,16 +794,13 @@ def build_written_content(event, subtype: str, seed: int,
                 "body", f"随附名册记有{names}，已押往{destination}候审。"))
         passages.append(_passage("closing", "伤亡、俘虏与物资损耗另见附页。"))
     elif base_subtype in ("literary_manuscript", "traveling_literary_copy"):
-        passages = _literary_passages(
-            seed,
-            document_key,
-            details.get("work_title", "无题文稿"),
-            details.get("author_name", "佚名"),
-            details.get("genre", "epic"),
-            {
+        literary_context = {
                 "creation_year": year,
                 "setting_name": details.get("setting_name", "这座城镇"),
                 "literary_sources": details.get("literary_sources", []),
+                "author_roles": details.get("author_roles", []),
+                "landscape_features": details.get(
+                    "landscape_features", []),
                 "biography_subject_name": details.get(
                     "biography_subject_name", "传主姓名不详"),
                 "biography_subject_birth_year": details.get(
@@ -565,8 +809,27 @@ def build_written_content(event, subtype: str, seed: int,
                     "biography_subject_death_year"),
                 "biography_subject_roles": details.get(
                     "biography_subject_roles", []),
-            },
-        )
+            }
+        genre = details.get("genre", "epic")
+        if genre in {
+                "epic", "drama", "chronicle", "lyric_cycle", "biography"}:
+            passages, composition_plan = compose_grounded_literature(
+                seed,
+                document_key,
+                details.get("work_title", "无题文稿"),
+                details.get("author_name", "佚名"),
+                genre,
+                literary_context,
+            )
+        else:
+            passages, composition_plan = compose_grounded_literature(
+                seed,
+                document_key,
+                details.get("work_title", "无题文稿"),
+                details.get("author_name", "佚名"),
+                "chronicle",
+                literary_context,
+            )
         if base_subtype == "traveling_literary_copy":
             passages.append(_passage(
                 "copy_note",
@@ -796,6 +1059,8 @@ def build_written_content(event, subtype: str, seed: int,
                 f"附记：{item.get('evidence_name', '一件争议物品')}已送交"
                 f"{item.get('to_location_name', '索取方')}复验；交接只确认收讫，"
                 "不抹去此前账册中的异议。"))
+    elif base_subtype == "grave_marker":
+        passages = _grave_marker_passages(details)
     elif base_subtype == "ruler_tomb":
         old_ruler = details.get("old_ruler", "墓主人")
         successor = details.get("new_ruler", "继任者")
@@ -836,23 +1101,22 @@ def build_written_content(event, subtype: str, seed: int,
             _passage("body", f"{old_ruler}去世后，{successor}继任。"),
             _passage("closing", f"此石立于{_year_label(death_year)}。"),
         ])
+    elif base_subtype in {
+            "hymn", "festival_song", "revised_hymn", "forbidden_hymn"}:
+        hymn_subtype = "hymn" if base_subtype == "festival_song" else base_subtype
+        passages = _hymn_passages(details, hymn_subtype)
     elif base_subtype == "religious_text":
-        refrain = _stable_choice(seed, document_key, "religious_refrain", [
-            "守火者应记住来路，也应为后来者留下名字。",
-            "石会风化，誓言须由活着的人一再见证。",
-            "在晨光照到门槛时，众人依次献水与谷粒。",
-        ])
-        passages = [
-            _passage("heading", "仪式诵文"),
-            _passage("body", refrain),
-            _passage("body", _stable_choice(seed, document_key, "religious_response", [
-                "领诵者读一遍，列席者重复末句三遍。",
-                "守灯者读首句，门边众人依次回答自己的名字。",
-                "献水之后全体静默一刻，再由年长者续读末段。",
-                "每读完一节便移动一枚石子，漏读者不得自行补词。",
-            ])),
-            _passage("closing", "此抄本供仪式中轮流诵读。"),
-        ]
+        passages = _liturgy_passages(details)
+    elif base_subtype == "ritual_calendar":
+        passages = _calendar_passages(
+            details, year, seed, document_key)
+    elif base_subtype == "reformed_liturgy":
+        passages = _reform_passages(details)
+    elif base_subtype == "reform_decree":
+        passages = _reform_passages(details, decree=True)
+    elif base_subtype == "prohibition_edict":
+        passages = _prohibition_passages(
+            details, seed, document_key)
     elif base_subtype == "rebel_manifesto":
         cause = details.get("cause", "overtaxation")
         grievances = {
@@ -1051,7 +1315,9 @@ def build_written_content(event, subtype: str, seed: int,
     elif base_subtype == "omen_record":
         passages = [
             _passage("heading", f"第{year}年天象观察"),
-            _passage("body", details.get("description_cn", "观测者绘下了当夜所见的天象。")),
+            _passage("body", details.get(
+                "observation_cn", details.get(
+                    "description_cn", "观测者绘下了当夜所见的天象。"))),
             _passage("body", _stable_choice(seed, document_key, "omen_observers", [
                 "图旁意见出自数位记录者，彼此并不一致。",
                 "三名观测者分别标出颜色，只有持续时间大致相合。",
@@ -1064,12 +1330,15 @@ def build_written_content(event, subtype: str, seed: int,
         passages = _generic_passages(
             event, base_subtype, seed, document_key)
 
-    return {
+    result = {
         "format_version": 2,
         "language_code": "common",
         "language_name": "通用语",
         "passages": passages,
     }
+    if composition_plan is not None:
+        result["composition_plan"] = composition_plan
+    return result
 
 
 def build_written_copy_content(source_content: dict, seed: int,

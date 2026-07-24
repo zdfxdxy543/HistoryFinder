@@ -8,6 +8,13 @@ import random
 from dataclasses import dataclass, field
 from typing import Optional
 
+from simulation.religion import (
+    compose_conflict_description,
+    compose_festival_description,
+    compose_omen_interpretation,
+    compose_reform_description,
+)
+
 
 @dataclass
 class HistoricalEvent:
@@ -419,6 +426,59 @@ class EventGenerator:
             },
         )
 
+    def generate_burial_event(
+            self, year: int, settlement_id: str, settlement_name: str,
+            person, burial, commissioner_name: str,
+            religion_profile: dict, life_sources: list[dict]
+            ) -> HistoricalEvent:
+        role_names = {
+            "founder": "建城者", "ruler": "统治者", "general": "将领",
+            "rebel_leader": "反抗领袖", "diplomat": "使者",
+            "scholar": "学者", "writer": "作者", "heir": "继承人",
+            "merchant": "商人", "artisan": "工匠", "scribe": "书记",
+            "priest": "仪式保管人", "elder": "长者",
+            "notable_child": "地方名门成员", "duelist": "决斗者",
+            "noble": "贵族", "explorer": "探索者", "notable": "地方名人",
+        }
+        roles = [role_names.get(role, role) for role in person.roles]
+        return HistoricalEvent(
+            id=self._next_id(), year=year, event_type="burial",
+            title=f"{person.name}安葬于{settlement_name}墓园",
+            severity=0.05,
+            primary_location=settlement_id,
+            participants=[settlement_id],
+            person_ids=[item for item in (
+                person.id, burial.commissioner_person_id) if item],
+            details={
+                "burial_id": burial.id,
+                "burial_registration": (
+                    f"第{person.id.rsplit('_', 1)[-1]}号墓葬"),
+                "cemetery_site_id": burial.site_id,
+                "person_id": person.id,
+                "person_name": person.name,
+                "birth_year": person.birth_year,
+                "death_year": person.death_year,
+                "burial_year": burial.burial_year,
+                "age": person.age_at(year),
+                "roles": list(person.roles),
+                "role_names": roles,
+                "home_settlement_id": person.settlement_id,
+                "home_settlement_name": settlement_name,
+                "commissioner_person_id": burial.commissioner_person_id,
+                "commissioner_name": commissioner_name,
+                "marker_type": burial.marker_type,
+                "religion_id": burial.religion_id,
+                "religion_profile": dict(religion_profile),
+                "life_sources": [dict(item) for item in life_sources],
+                "source_event_ids": list(burial.source_event_ids),
+                "description_cn": (
+                    f"{year}年，{person.name}被安葬在{settlement_name}墓园；"
+                    f"墓碑由{commissioner_name or '聚落共同体'}主持立置。"),
+            },
+            importance_score=0.12 if roles else 0.05,
+            visibility_score=0.45,
+        )
+
     def generate_population_milestone(self, year: int,
                                        settlement_id: str, settlement_name: str,
                                        milestone: int) -> HistoricalEvent:
@@ -455,20 +515,34 @@ class EventGenerator:
         )
 
     def generate_festival_event(self, year: int,
-                                 settlement_id: str, settlement_name: str) -> HistoricalEvent:
+                                 settlement_id: str, settlement_name: str,
+                                 religion=None) -> HistoricalEvent:
         festivals = [
             ("丰收节", f"{year}年，{settlement_name}举行了盛大的丰收庆典。街道上挂满了彩带，人们载歌载舞，庆祝又一个丰年的到来。"),
             ("建国纪念", f"{year}年，{settlement_name}举办了建国周年庆典。游行的队伍穿过城市，诗人吟唱着先祖的功绩。"),
             ("神殿奠基", f"{year}年，{settlement_name}为一座新的神殿举行了奠基仪式。祭司们进行了庄严的祈福，全城居民都前来观礼。"),
         ]
         name, desc = self.rng.choice(festivals)
+        profile = {}
+        if religion is not None:
+            profile = religion.text_profile()
+            name = f"{religion.name}{name}"
+            desc = compose_festival_description(
+                year, settlement_name, profile)
         return HistoricalEvent(
             id=self._next_id(), year=year, event_type="festival",
             title=f"{settlement_name}{name}",
             severity=0.1,
             primary_location=settlement_id,
             participants=[settlement_id],
-            details={"description_cn": desc},
+            details={
+                "description_cn": desc,
+                "religion_id": religion.id if religion else "",
+                "religion_name": religion.name if religion else "",
+                "ritual": religion.primary_ritual if religion else "",
+                "sacred_symbol": religion.sacred_symbol if religion else "",
+                "religion_profile": profile,
+            },
         )
 
     # ==================== Phase 2 新增：纹理事件 ====================
@@ -559,20 +633,89 @@ class EventGenerator:
         )
 
     def generate_omen_event(self, year: int, settlement_id: str,
-                             settlement_name: str) -> HistoricalEvent:
+                             settlement_name: str, religion=None) -> HistoricalEvent:
         omens = [
             ("彗星", f"{year}年，一颗明亮的彗星划过{settlement_name}的夜空。祭司们对此争论不休——有人说是吉兆，有人说是灾祸的预兆。"),
             ("日食", f"{year}年，白昼突然变成黑夜。{settlement_name}的居民惊恐万分，认为这是诸神发怒的信号。"),
             ("双彩虹", f"{year}年，暴风雨之后，{settlement_name}的天空出现了罕见的双彩虹。人们相信这是先祖的祝福。"),
         ]
         name, desc = self.rng.choice(omens)
+        observation = desc
+        interpretation = ""
+        profile = {}
+        if religion is not None:
+            profile = religion.text_profile()
+            interpretation = compose_omen_interpretation(profile, name)
+            desc = f"{observation}{interpretation}"
         return HistoricalEvent(
             id=self._next_id(), year=year, event_type="omen",
             title=f"{settlement_name}出现{name}",
             severity=0.06,
             primary_location=settlement_id,
             participants=[settlement_id],
-            details={"description_cn": desc},
+            details={
+                "description_cn": desc,
+                "observation_cn": observation,
+                "interpretation_cn": interpretation,
+                "religion_id": religion.id if religion else "",
+                "religion_name": religion.name if religion else "",
+                "religion_profile": profile,
+            },
+        )
+
+    def generate_religious_reform_event(
+            self, year: int, settlement_id: str, settlement_name: str,
+            parent, reformed, reformer_id: str = "",
+            reformer_name: str = "") -> HistoricalEvent:
+        reason = reformed.reform_reason or "仪式解释之争"
+        parent_profile = parent.text_profile()
+        profile = reformed.text_profile()
+        description, changed = compose_reform_description(
+            year, settlement_name, parent_profile, profile, reason)
+        return HistoricalEvent(
+            id=self._next_id(), year=year, event_type="religious_reform",
+            title=f"{settlement_name}出现{reformed.name}", severity=0.24,
+            primary_location=settlement_id,
+            participants=[settlement_id],
+            person_ids=[reformer_id] if reformer_id else [],
+            details={
+                "description_cn": description,
+                "parent_religion_id": parent.id,
+                "parent_religion_name": parent.name,
+                "religion_id": reformed.id,
+                "religion_name": reformed.name,
+                "reform_reason": reason,
+                "reformer_id": reformer_id,
+                "reformer_name": reformer_name,
+                "ritual": reformed.primary_ritual,
+                "sacred_symbol": reformed.sacred_symbol,
+                "parent_religion_profile": parent_profile,
+                "religion_profile": profile,
+                "changed_dimensions": changed,
+            },
+        )
+
+    def generate_religious_conflict_event(
+            self, year: int, settlement_id: str, settlement_name: str,
+            dominant, minority) -> HistoricalEvent:
+        dominant_profile = dominant.text_profile()
+        minority_profile = minority.text_profile()
+        description = compose_conflict_description(
+            year, settlement_name, dominant_profile, minority_profile)
+        return HistoricalEvent(
+            id=self._next_id(), year=year, event_type="religious_conflict",
+            title=f"{settlement_name}发生祭仪冲突", severity=0.38,
+            primary_location=settlement_id,
+            participants=[settlement_id],
+            details={
+                "description_cn": description,
+                "dominant_religion_id": dominant.id,
+                "dominant_religion_name": dominant.name,
+                "minority_religion_id": minority.id,
+                "minority_religion_name": minority.name,
+                "dominant_religion_profile": dominant_profile,
+                "minority_religion_profile": minority_profile,
+            },
         )
 
     def generate_duel_event(self, year: int, settlement_id: str,

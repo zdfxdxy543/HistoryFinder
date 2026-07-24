@@ -12,6 +12,7 @@ import {
   CloudLightning,
   CloudRain,
   Eye,
+  EyeOff,
   FileText,
   Footprints,
   Globe2,
@@ -26,6 +27,7 @@ import {
   Search,
   Snowflake,
   Sun,
+  Terminal,
   Users,
   Wind,
   X,
@@ -106,6 +108,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [cheatDialogOpen, setCheatDialogOpen] = useState(false);
+  const [cheatCode, setCheatCode] = useState("");
   const started = useRef(false);
 
   const createWorld = useCallback(async () => {
@@ -125,6 +129,8 @@ export default function App() {
       setDetail(null);
       setDockTab("inspect");
       setViewMode("local");
+      setCheatDialogOpen(false);
+      setCheatCode("");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "无法创建世界");
     } finally {
@@ -183,6 +189,25 @@ export default function App() {
     if (!sessionId) return null;
     try {
       const result = await performAction(sessionId, { action: "move", dx, dy });
+      if (result.location && result.world_map) {
+        setState((current) => current ? {
+          ...current,
+          ...result.location,
+          world_map: result.world_map!,
+        } : current);
+        setSelected(null);
+        setActiveEvidenceId(null);
+        setNearbyIds([]);
+        setCompareIds([]);
+        setDetail(null);
+      } else if (result.local_map) {
+        setState((current) => current ? {
+          ...current,
+          local_map: result.local_map!,
+        } : current);
+        setSelected(null);
+        setNearbyIds([]);
+      }
       if (result.runtime) setRuntime(result.runtime);
       return result.runtime ?? null;
     } catch (error) {
@@ -224,7 +249,7 @@ export default function App() {
 
   const onSelect = useCallback((entity: MapEntity) => {
     setSelected(entity);
-    setDockTab(["evidence", "container"].includes(entity.kind) ? "inspect" : "people");
+    setDockTab(["informant", "resident"].includes(entity.kind) ? "people" : "inspect");
     if (entity.kind === "evidence") setActiveEvidenceId(entity.id);
   }, []);
 
@@ -239,6 +264,8 @@ export default function App() {
         void runAction({ action: "search_container", container_id: entity.id });
       } else if (entity.kind === "evidence" && !examinedIds.has(entity.id)) {
         void runAction({ action: "examine", evidence_id: entity.id });
+      } else if (["landmark", "camp", "caravan", "traveler", "trace", "wildlife"].includes(entity.kind)) {
+        void runAction({ action: "inspect_wilderness", entity_id: entity.id });
       }
     },
     [examinedIds, onSelect, runAction],
@@ -251,6 +278,7 @@ export default function App() {
   ) : false;
   const selectedEvidence = selected?.kind === "evidence" ? selected : null;
   const selectedContainer = selected?.kind === "container" ? selected : null;
+  const selectedWilderness = selected && ["landmark", "camp", "caravan", "traveler", "trace", "wildlife"].includes(selected.kind) ? selected : null;
   const selectedPerson = selected && ["informant", "resident"].includes(selected.kind) ? selected : null;
   const activeEvidence = useMemo(
     () => state?.local_map.discovered_evidence.find((item) => item.id === activeEvidenceId) ?? null,
@@ -273,6 +301,50 @@ export default function App() {
       second_id: compareIds[1],
     });
     if (result) setDockTab("inspect");
+  };
+
+  const submitCheatCode = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!sessionId || !cheatCode.trim()) return;
+    setBusy(true);
+    setNotice("");
+    try {
+      const result = await performAction(sessionId, {
+        action: "enter_cheat",
+        code: cheatCode,
+      });
+      if (result.cheats) {
+        setState((current) => current ? { ...current, cheats: result.cheats! } : current);
+      }
+      if (result.runtime) setRuntime(result.runtime);
+      setCheatCode("");
+      setNotice("作弊码已接受。全图视野选项已解锁。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "作弊码无效");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const setFullMapVision = async (enabled: boolean) => {
+    if (!sessionId) return;
+    setBusy(true);
+    setNotice("");
+    try {
+      const result = await performAction(sessionId, {
+        action: "set_cheat",
+        cheat_id: "full_map_vision",
+        enabled,
+      });
+      if (result.cheats) {
+        setState((current) => current ? { ...current, cheats: result.cheats! } : current);
+      }
+      if (result.runtime) setRuntime(result.runtime);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "无法切换作弊选项");
+    } finally {
+      setBusy(false);
+    }
   };
 
   if (!state && !loading) {
@@ -307,7 +379,9 @@ export default function App() {
                 <MapPinned size={14} /> 当地
               </button>
             </nav>
-            <span>{state.settlement.name} · {state.local_map.site_type === "ruin" ? "废墟" : BIOME_LABELS[state.settlement.biome] ?? state.settlement.biome}</span>
+            <span>{state.settlement
+              ? `${state.settlement.name} · ${state.local_map.site_type === "ruin" ? "废墟" : BIOME_LABELS[state.settlement.biome] ?? state.settlement.biome}`
+              : `${state.local_map.profile.landscape_name} · 荒野 (${state.local_map.cell.x}, ${state.local_map.cell.y})`}</span>
           </div>
         )}
         <div className="world-settings">
@@ -322,12 +396,16 @@ export default function App() {
           {runtime && (
             <div
               className="environment-readout"
-              title={`${runtime.environment.daylight_name}，${runtime.environment.weather_name}，可见 ${runtime.environment.visibility_radius} 格`}
+              title={runtime.full_map_vision
+                ? "全图视野已开启"
+                : `${runtime.environment.daylight_name}，${runtime.environment.weather_name}，可见 ${runtime.environment.visibility_radius} 格`}
             >
               <EnvironmentGlyph weather={runtime.environment.weather} />
               <span>
                 <strong>{runtime.environment.weather_name}</strong>
-                <small><Eye size={10} /> {runtime.environment.daylight_name} · {runtime.environment.visibility_radius} 格</small>
+                <small><Eye size={10} /> {runtime.full_map_vision
+                  ? "全图视野"
+                  : `${runtime.environment.daylight_name} · ${runtime.environment.visibility_radius} 格`}</small>
               </span>
             </div>
           )}
@@ -345,6 +423,20 @@ export default function App() {
           <button className="icon-command" title="等待 10 分钟" onClick={() => void runAction({ action: "wait", minutes: 10 })} disabled={loading || busy}>
             <Hourglass size={18} />
           </button>
+          <button className="icon-command" title="作弊码控制台" onClick={() => setCheatDialogOpen(true)} disabled={loading || busy}>
+            <Terminal size={18} />
+          </button>
+          {state?.cheats.full_map_vision.unlocked && (
+            <button
+              className={`icon-command cheat-quick-toggle${state.cheats.full_map_vision.enabled ? " selected" : ""}`}
+              title={state.cheats.full_map_vision.enabled ? "关闭全图视野" : "开启全图视野"}
+              aria-pressed={state.cheats.full_map_vision.enabled}
+              onClick={() => void setFullMapVision(!state.cheats.full_map_vision.enabled)}
+              disabled={loading || busy}
+            >
+              {state.cheats.full_map_vision.enabled ? <Eye size={18} /> : <EyeOff size={18} />}
+            </button>
+          )}
         </div>
       </header>
 
@@ -378,6 +470,11 @@ export default function App() {
             <span><i className="key-dot evidence" />现场证据</span>
             <span><i className="key-dot person" />知情人</span>
             <span><i className="key-dot resident" />居民</span>
+            <span><i className="key-dot landmark" />路标、圣所与陈设</span>
+            <span><i className="key-dot trace" />活动痕迹</span>
+            <span><i className="key-dot wildlife" />野生动物</span>
+            <span><i className="key-dot caravan" />商队</span>
+            <span><i className="key-dot traveler" />道路行人</span>
             <span><i className="key-dot player" />玩家</span>
           </div>
           <div className="mobile-pad" aria-label="移动控制">
@@ -406,7 +503,7 @@ export default function App() {
           <div className="dock-content">
             {dockTab === "inspect" && (
               <InspectPanel
-                selected={selectedEvidence ?? selectedContainer}
+                selected={selectedEvidence ?? selectedContainer ?? selectedWilderness}
                 nearby={selectedIsNearby}
                 examined={selectedEvidence ? examinedIds.has(selectedEvidence.id) : false}
                 read={selectedEvidence ? readIds.has(selectedEvidence.id) : false}
@@ -418,6 +515,7 @@ export default function App() {
                 onSearch={(id) => void runAction({ action: "search_container", container_id: id })}
                 onExamine={(id) => void runAction({ action: "examine", evidence_id: id })}
                 onRead={(id) => void runAction({ action: "read", evidence_id: id })}
+                onInspectWilderness={(id) => void runAction({ action: "inspect_wilderness", entity_id: id })}
                 onToggleCompare={addToCompare}
                 onCompare={() => void compare()}
                 onClearDetail={() => setDetail(null)}
@@ -465,6 +563,38 @@ export default function App() {
       </main>
       )}
 
+      {cheatDialogOpen && state && (
+        <div className="cheat-backdrop" role="presentation" onMouseDown={() => setCheatDialogOpen(false)}>
+          <section className="cheat-dialog" role="dialog" aria-modal="true" aria-labelledby="cheat-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
+            <header>
+              <div>
+                <small>系统控制台</small>
+                <h2 id="cheat-dialog-title">作弊码</h2>
+              </div>
+              <button className="icon-command quiet" title="关闭" onClick={() => setCheatDialogOpen(false)}><X size={16} /></button>
+            </header>
+            <form className="cheat-code-form" onSubmit={(event) => void submitCheatCode(event)}>
+              <label htmlFor="cheat-code">输入作弊码</label>
+              <div>
+                <input id="cheat-code" value={cheatCode} onChange={(event) => setCheatCode(event.target.value)} autoComplete="off" spellCheck={false} autoFocus />
+                <button className="command-button primary" type="submit" disabled={busy || !cheatCode.trim()}><Terminal size={15} /> 提交</button>
+              </div>
+            </form>
+            {state.cheats.full_map_vision.unlocked && (
+              <label className="cheat-option">
+                <span><Eye size={18} /><strong>全图视野</strong></span>
+                <input
+                  type="checkbox"
+                  checked={state.cheats.full_map_vision.enabled}
+                  onChange={(event) => void setFullMapVision(event.target.checked)}
+                  disabled={busy}
+                />
+              </label>
+            )}
+          </section>
+        </div>
+      )}
+
       {notice && (
         <div className="notice" role="alert">
           <Info size={16} />
@@ -496,12 +626,15 @@ function InspectPanel(props: {
   onSearch: (id: string) => void;
   onExamine: (id: string) => void;
   onRead: (id: string) => void;
+  onInspectWilderness: (id: string) => void;
   onToggleCompare: (id: string) => void;
   onCompare: () => void;
   onClearDetail: () => void;
 }) {
   const { selected, detail } = props;
   const isContainer = selected?.kind === "container";
+  const isWilderness = Boolean(
+    selected && ["landmark", "camp", "caravan", "traveler", "trace", "wildlife"].includes(selected.kind));
   const visibleEvidence = isContainer
     ? props.evidence.filter((item) => item.container_id === selected.id)
     : props.evidence;
@@ -511,7 +644,13 @@ function InspectPanel(props: {
         <p className="eyebrow">现场调查</p>
         <h2>{selected?.name ?? "选择调查地点"}</h2>
         <p>
-          {isContainer
+          {isWilderness
+            ? `${selected?.role_name} · ${selected?.zone}${selected?.wear_name
+              ? ` · ${selected.wear_name} · ${selected.repair_name}${selected.repair_error_type !== "none"
+                ? ` · ${selected.repair_error_name}`
+                : ""}`
+              : ""}。${selected?.description_cn}`
+            : isContainer
             ? `${selected.role_name} · ${selected.condition}。${selected.description_cn}`
             : selected
             ? `${TYPE_LABELS[selected.subtype] ?? selected.subtype} · ${MATERIAL_LABELS[selected.material] ?? selected.material} · ${selected.zone}`
@@ -525,6 +664,16 @@ function InspectPanel(props: {
         <div className="command-row">
           <button className="command-button primary" disabled={!props.nearby || props.busy} onClick={() => props.onSearch(selected.id)}>
             <Search size={15} /> {selected.searched ? "重新搜索" : "搜索此处"}
+          </button>
+        </div>
+      )}
+      {isWilderness && selected && (
+        <div className="command-row">
+          <button className="command-button primary" disabled={!props.nearby || props.busy} onClick={() => props.onInspectWilderness(selected.id)}>
+            <Search size={15} /> {selected.kind === "caravan"
+              ? "与领队交谈"
+              : selected.kind === "traveler" ? "与行人交谈"
+              : selected.kind === "wildlife" ? "观察动物" : "查看此处"}
           </button>
         </div>
       )}
@@ -549,7 +698,7 @@ function InspectPanel(props: {
         </p>
       )}
 
-      <section className="discovered-catalog">
+      {!isWilderness && <section className="discovered-catalog">
         <div className="section-title">
           <h3>{isContainer ? "此处已发现的材料" : "已发现证物"}</h3>
           <span>{visibleEvidence.length}</span>
@@ -572,7 +721,7 @@ function InspectPanel(props: {
             {isContainer && !selected.searched ? "这里尚未搜索。" : "尚未在这里发现可登记的实体证物。"}
           </p>
         )}
-      </section>
+      </section>}
 
       {props.compareIds.length > 0 && (
         <section className="compare-strip">
@@ -845,7 +994,7 @@ function journalCount(journal: Journal, tab: JournalTab) {
 }
 
 function actionTitle(action: string) {
-  return { examine: "客观检查", read: "文书阅读", consult: "咨询记录", compare: "证物比较", talk: "街头闲谈" }[action] ?? "调查结果";
+  return { examine: "客观检查", read: "文书阅读", consult: "咨询记录", compare: "证物比较", talk: "街头闲谈", inspect_wilderness: "荒野见闻" }[action] ?? "调查结果";
 }
 
 function move(dx: number, dy: number) {

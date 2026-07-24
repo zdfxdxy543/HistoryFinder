@@ -8,6 +8,7 @@ const TILE_COLORS = [
   "#676861", "#755f48", "#846a4b", "#b7a47f", "#c19a72",
   "#c5ad72", "#355f43", "#6f746d", "#7f8c52", "#8c7350",
   "#aeb5aa", "#526f61",
+  "#55735a",
 ];
 
 type Props = {
@@ -65,6 +66,7 @@ class SettlementScene extends Phaser.Scene {
 
   create() {
     this.drawMap();
+    this.drawDecorations();
     this.drawBuildings();
     this.drawEntities();
     this.player = this.createPlayer(
@@ -251,7 +253,74 @@ class SettlementScene extends Phaser.Scene {
       context.moveTo(px + 19, py + 25);
       context.lineTo(px + 22, py + 11);
       context.stroke();
+    } else if (tile === 17) {
+      context.strokeStyle = "rgba(116, 91, 57, .95)";
+      context.lineWidth = 3;
+      context.beginPath();
+      context.moveTo(px + 3, py + 10);
+      context.lineTo(px + 29, py + 10);
+      context.moveTo(px + 3, py + 23);
+      context.lineTo(px + 29, py + 23);
+      for (const post of [6, 16, 26]) {
+        context.moveTo(px + post, py + 3);
+        context.lineTo(px + post, py + 29);
+      }
+      context.stroke();
     }
+  }
+
+  private drawDecorations() {
+    this.mapData.decorations.forEach((decoration) => {
+      const detail = this.add.graphics()
+        .setPosition(
+          decoration.x * TILE_SIZE + TILE_SIZE / 2,
+          decoration.y * TILE_SIZE + TILE_SIZE / 2,
+        )
+        .setScale(decoration.scale)
+        .setDepth(1);
+      const subtype = decoration.subtype;
+      if (["grass_tuft", "dry_grass", "pale_grass", "water_grass", "reeds"].includes(subtype)) {
+        const color = subtype === "reeds" || subtype === "water_grass"
+          ? 0x6f8c63 : subtype === "pale_grass" ? 0xaab29d
+            : subtype === "dry_grass" ? 0xa79463 : 0x78935d;
+        detail.lineStyle(subtype === "reeds" ? 2 : 1.4, color, 0.9);
+        for (const offset of [-6, -2, 3, 7]) {
+          const height = 6 + ((decoration.variant + offset + 8) % 5);
+          detail.lineBetween(offset, 8, offset - 2, 8 - height);
+        }
+      } else if (["wildflowers", "heather", "mushroom", "leaf_patch", "lichen"].includes(subtype)) {
+        const colors = subtype === "wildflowers"
+          ? [0xd6b85e, 0xc87572, 0xe3ddd0]
+          : subtype === "heather" ? [0x9c7895, 0xb18a9f]
+            : subtype === "mushroom" ? [0xc8b28a, 0xa56f52]
+              : [0x829668, 0xa1aa7b];
+        for (let index = 0; index < 5; index += 1) {
+          detail.fillStyle(colors[(index + decoration.variant) % colors.length], 0.9);
+          detail.fillCircle(-7 + index * 3.5, 3 - (index % 2) * 4, subtype === "mushroom" ? 2 : 1.5);
+        }
+      } else if (["stone_cluster", "river_stone", "small_stone"].includes(subtype)) {
+        const color = subtype === "river_stone" ? 0x809398 : 0x898d84;
+        detail.fillStyle(color, 0.85);
+        detail.fillEllipse(-4, 4, 11, 7);
+        detail.fillEllipse(5, 5, 9, 6);
+        if (subtype === "stone_cluster") detail.fillEllipse(1, -1, 8, 8);
+      } else if (["fallen_branch", "driftwood", "dead_branch", "bleached_branch"].includes(subtype)) {
+        const color = subtype === "bleached_branch" ? 0xb4aa8f : 0x70543b;
+        detail.lineStyle(2.5, color, 0.9);
+        detail.lineBetween(-10, 6, 10, -4);
+        detail.lineBetween(-2, 2, -7, -5);
+        detail.lineBetween(4, -1, 9, 3);
+      } else {
+        const color = ["dry_shrub", "thorn_bush", "desert_grass"].includes(subtype)
+          ? 0x8d8053 : subtype === "willow_shoot" ? 0x668b61 : 0x587b50;
+        detail.fillStyle(color, 0.72);
+        detail.fillCircle(-5, 3, 6);
+        detail.fillCircle(2, 0, 8);
+        detail.fillCircle(8, 4, 5);
+        detail.lineStyle(1.2, 0x405b3d, 0.8);
+        detail.lineBetween(0, 7, 0, -7);
+      }
+    });
   }
 
   private fillCircle(
@@ -296,10 +365,37 @@ class SettlementScene extends Phaser.Scene {
         well.strokeCircle(centerX, centerY, 12);
         return;
       }
+      if (building.building_type === "cemetery") {
+        const cemetery = this.add.graphics().setDepth(3);
+        cemetery.lineStyle(
+          3, building.condition === "ruined" ? 0x625f57 : 0x929087, 0.95,
+        );
+        cemetery.strokeRect(
+          left * TILE_SIZE + 4,
+          top * TILE_SIZE + 4,
+          (right - left + 1) * TILE_SIZE - 8,
+          (bottom - top + 1) * TILE_SIZE - 8,
+        );
+        this.add.text(
+          (left + 1) * TILE_SIZE,
+          (top + 1) * TILE_SIZE,
+          building.name,
+          {
+            fontFamily: '"Microsoft YaHei", sans-serif',
+            fontSize: "10px",
+            color: "#f0eee6",
+            backgroundColor: "rgba(54,58,54,0.78)",
+            padding: { x: 4, y: 2 },
+          },
+        ).setDepth(5);
+        return;
+      }
       const doorX = building.door.x * TILE_SIZE;
       const doorY = building.door.y * TILE_SIZE;
       const detail = this.add.graphics().setDepth(4);
-      detail.fillStyle(0x5f3f2d, 1);
+      const damaged = building.condition === "damaged";
+      const ruined = building.condition === "ruined";
+      detail.fillStyle(ruined ? 0x514b42 : damaged ? 0x76583f : 0x5f3f2d, 1);
       detail.fillRect(doorX + 10, doorY + 10, 12, 18);
 
       if (building.building_type === "home") {
@@ -307,7 +403,14 @@ class SettlementScene extends Phaser.Scene {
         detail.fillRect((left + 1) * TILE_SIZE + 7, (top + 1) * TILE_SIZE + 7, 11, 11);
         detail.lineStyle(2, 0xe0c48c, 0.55);
         detail.strokeRect((right - 1) * TILE_SIZE + 7, (bottom - 1) * TILE_SIZE + 7, 14, 10);
-      } else if (["inn", "bakery", "granary"].includes(building.building_type)) {
+      } else if ([
+        "inn", "bakery", "granary", "library", "great_market",
+        "fortification", "aqueduct", "palace", "temple",
+        "roadside_inn", "tollhouse", "farmstead", "mine",
+        "logging_camp", "watchtower", "battlefield_ruins",
+        "burned_waystation", "disaster_ruins", "abandoned_hamlet",
+        "ruined_outpost",
+      ].includes(building.building_type)) {
         this.add
           .text((left + 1) * TILE_SIZE, (top + 1) * TILE_SIZE, building.name, {
             fontFamily: '"Microsoft YaHei", sans-serif',
@@ -317,6 +420,14 @@ class SettlementScene extends Phaser.Scene {
             padding: { x: 4, y: 2 },
           })
           .setDepth(5);
+      }
+
+      if (building.infrastructure_type && (damaged || ruined)) {
+        detail.lineStyle(3, ruined ? 0x342f2a : 0x806a52, 0.95);
+        const startX = (left + 1) * TILE_SIZE;
+        const startY = (top + 1) * TILE_SIZE;
+        detail.lineBetween(startX, startY, startX + 18, startY + 13);
+        detail.lineBetween(startX + 18, startY + 2, startX + 5, startY + 20);
       }
     });
   }
@@ -329,7 +440,153 @@ class SettlementScene extends Phaser.Scene {
       const marker = this.add.container(x, y).setDepth(8);
       const shadow = this.add.ellipse(0, 11, 22, 8, 0x18201c, 0.28);
       const shape = this.add.graphics();
-      if (entity.kind === "informant") {
+      if (entity.kind === "landmark") {
+        if (entity.subtype === "sacred_shrine") {
+          shape.fillStyle(0x77766d, 1);
+          shape.fillRect(-12, 2, 24, 10);
+          shape.fillStyle(0xa6a28f, 1);
+          shape.fillRect(-8, -10, 16, 14);
+          shape.lineStyle(2, 0xd1b86f, 0.9);
+          shape.strokeCircle(0, -3, 5);
+          shape.fillStyle(0x65809a, 0.9);
+          shape.fillCircle(-6, 8, 3);
+        } else if (entity.subtype === "temple_altar") {
+          shape.fillStyle(0x8d887d, 1);
+          shape.fillRect(-14, -6, 28, 16);
+          shape.fillStyle(0xc4b77f, 1);
+          shape.fillRect(-10, -10, 20, 5);
+          shape.lineStyle(2, 0x5f645d, 1);
+          shape.strokeCircle(0, 1, 5);
+        } else if (entity.subtype === "offering_table") {
+          shape.fillStyle(0x79583d, 1);
+          shape.fillRect(-14, -5, 28, 8);
+          shape.fillRect(-10, 3, 4, 11);
+          shape.fillRect(6, 3, 4, 11);
+          shape.fillStyle(0xd4bc72, 1);
+          shape.fillCircle(-5, -7, 3);
+          shape.fillStyle(0x7493a2, 1);
+          shape.fillCircle(5, -7, 3);
+        } else if (entity.subtype === "votive_wall") {
+          shape.fillStyle(0x89877e, 1);
+          shape.fillRect(-15, -14, 30, 27);
+          shape.lineStyle(1.5, 0xc7b77d, 0.85);
+          shape.lineBetween(-9, -8, 8, -8);
+          shape.lineBetween(-7, -2, 10, -2);
+          shape.lineBetween(-10, 5, 5, 5);
+        } else {
+          const signColor = entity.wear_level === "heavy"
+          ? 0x8f7650
+          : entity.wear_level === "moderate" ? 0xad9161 : 0xc8ad73;
+        shape.lineStyle(4, 0x5f432d, 1);
+        shape.lineBetween(0, -16, 0, 15);
+        shape.fillStyle(signColor, 1);
+        shape.fillTriangle(-13, -13, 13, -13, 8, -4);
+        shape.lineStyle(1.5, 0x4b3928, 1);
+        shape.strokeTriangle(-13, -13, 13, -13, 8, -4);
+        if (entity.wear_level !== "light") {
+          shape.lineStyle(1.2, 0x66513a, 0.85);
+          shape.lineBetween(-8, -11, -2, -6);
+          if (entity.wear_level === "heavy") {
+            shape.lineBetween(4, -12, 8, -7);
+          }
+        }
+        if (entity.repair_type === "iron_strap") {
+          shape.fillStyle(0x777b74, 0.95);
+          shape.fillRect(-2, -16, 4, 10);
+        } else if (entity.repair_type === "replacement_board") {
+          shape.fillStyle(0xd8be83, 0.95);
+          shape.fillRect(2, -12, 7, 4);
+          shape.fillStyle(0x4b3928, 1);
+          shape.fillCircle(4, -10, 1);
+        } else if (entity.repair_type === "rope_binding") {
+          shape.lineStyle(1.5, 0xc1a16d, 1);
+          for (const repairY of [-5, -2, 1]) {
+            shape.lineBetween(-4, repairY, 4, repairY + 1);
+          }
+        } else if (entity.repair_type === "fresh_paint") {
+          shape.lineStyle(2, 0xb76532, 1);
+          shape.lineBetween(-7, -9, 6, -9);
+          shape.lineBetween(6, -9, 2, -12);
+          shape.lineBetween(6, -9, 2, -6);
+        }
+        }
+      } else if (entity.kind === "camp") {
+        shape.fillStyle(entity.subtype.includes("abandoned") ? 0x786e5e : 0xb8874d, 1);
+        shape.fillTriangle(0, -15, 14, 12, -14, 12);
+        shape.lineStyle(2, 0x463628, 1);
+        shape.strokeTriangle(0, -15, 14, 12, -14, 12);
+        shape.fillStyle(0xd76b39, entity.subtype.includes("abandoned") ? 0.2 : 0.9);
+        shape.fillCircle(16, 9, 4);
+      } else if (entity.kind === "caravan") {
+        shape.fillStyle(0x8b6848, 1);
+        shape.fillRoundedRect(-15, -7, 26, 17, 3);
+        shape.fillStyle(0xd0bb83, 1);
+        shape.fillTriangle(-13, -7, 8, -7, -2, -19);
+        shape.fillStyle(0x363a35, 1);
+        shape.fillCircle(-9, 12, 4);
+        shape.fillCircle(7, 12, 4);
+        shape.lineStyle(2, 0x49392b, 1);
+        shape.lineBetween(11, 0, 18, -6);
+      } else if (entity.kind === "traveler") {
+        const clothing = entity.subtype === "pilgrim" ? 0x7f6f95
+          : entity.subtype === "courier" ? 0x557b8b
+            : entity.subtype === "peddler" ? 0x8a6847 : 0x7c765f;
+        shape.fillStyle(0xd6b98a, 1);
+        shape.fillCircle(0, -7, 5);
+        shape.fillStyle(clothing, 1);
+        shape.fillRoundedRect(-7, -1, 14, 16, 2);
+        shape.lineStyle(2, 0x4b3928, 0.9);
+        shape.lineBetween(-3, 14, -5, 20);
+        shape.lineBetween(3, 14, 6, 20);
+        if (entity.subtype === "pilgrim") {
+          shape.lineStyle(2, 0xc8ad73, 1);
+          shape.lineBetween(9, -10, 9, 20);
+          shape.fillCircle(9, -12, 2);
+        } else if (entity.subtype === "peddler") {
+          shape.fillStyle(0x9b794f, 1);
+          shape.fillRoundedRect(6, 0, 9, 11, 2);
+        }
+      } else if (entity.kind === "trace") {
+        shape.fillStyle(0x7d6248, 0.82);
+        if (entity.subtype === "broken_wheel") {
+          shape.lineStyle(3, 0x75583e, 1);
+          shape.strokeCircle(0, 0, 11);
+          shape.lineBetween(-8, -8, 8, 8);
+          shape.lineBetween(-8, 8, 8, -8);
+        } else if (entity.subtype === "old_fire_ring" || entity.subtype === "charcoal_patch") {
+          shape.fillStyle(0x4f4940, 0.8);
+          shape.fillEllipse(0, 5, 25, 14);
+          shape.lineStyle(2, 0x8c806d, 0.9);
+          shape.strokeEllipse(0, 5, 26, 15);
+        } else if (entity.subtype === "stone_cairn") {
+          shape.fillStyle(0x85877f, 1);
+          shape.fillEllipse(0, 8, 22, 8);
+          shape.fillEllipse(0, 2, 16, 8);
+          shape.fillEllipse(0, -4, 10, 7);
+        } else {
+          shape.lineStyle(3, 0x75583e, 0.9);
+          shape.lineBetween(-13, 7, 13, 1);
+          shape.lineBetween(-12, 12, 14, 6);
+          shape.fillCircle(-8, 5, 2);
+          shape.fillCircle(9, 4, 2);
+        }
+      } else if (entity.kind === "wildlife") {
+        const wildlifeColor = ["deer", "mountain_goat", "fox"].includes(entity.subtype)
+          ? 0x9a7650 : ["heron", "waterfowl", "ptarmigan"].includes(entity.subtype)
+            ? 0xc6c8b8 : entity.subtype === "lizard" ? 0x70865c : 0xa98d68;
+        shape.fillStyle(wildlifeColor, 1);
+        shape.fillEllipse(0, 2, entity.subtype === "lizard" ? 18 : 16, entity.subtype === "lizard" ? 6 : 10);
+        shape.fillCircle(8, -2, 4);
+        shape.lineStyle(2, 0x493d31, 0.9);
+        if (entity.subtype === "deer" || entity.subtype === "mountain_goat") {
+          shape.lineBetween(7, -5, 5, -11);
+          shape.lineBetween(9, -5, 12, -11);
+        } else if (entity.subtype === "heron") {
+          shape.lineBetween(5, 1, 9, -12);
+        } else if (entity.subtype === "lizard") {
+          shape.lineBetween(-8, 2, -15, 6);
+        }
+      } else if (entity.kind === "informant") {
         shape.fillStyle(0xd0b26e, 1);
         shape.fillCircle(0, -7, 6);
         shape.fillStyle(0x324f47, 1);
@@ -406,6 +663,20 @@ class SettlementScene extends Phaser.Scene {
             shape.fillStyle(0xd7c091, 1);
             shape.fillRect(-2, -4, 4, 6);
           }
+        }
+      } else if (["grave_marker", "ruler_tomb"].includes(entity.subtype)) {
+        const ruined = entity.state === "ruined" || entity.state === "buried";
+        shape.fillStyle(ruined ? 0x6f706a : 0x9a9b92, 1);
+        shape.fillRoundedRect(-9, -15, 18, 28, 3);
+        shape.fillStyle(0x77786f, 1);
+        shape.fillRect(-13, 10, 26, 6);
+        shape.lineStyle(1.5, 0x4b504d, 0.95);
+        shape.lineBetween(-5, -7, 5, -7);
+        shape.lineBetween(-5, -2, 4, -2);
+        shape.lineBetween(-5, 3, 6, 3);
+        if (ruined) {
+          shape.lineStyle(2, 0x50534f, 1);
+          shape.lineBetween(-8, -4, 5, 8);
         }
       } else if (entity.placement_kind === "structural") {
         shape.fillStyle(0x85877f, 1);
@@ -507,7 +778,7 @@ class SettlementScene extends Phaser.Scene {
 
   private isWalkable(x: number, y: number) {
     if (x < 0 || y < 0 || x >= this.mapData.width || y >= this.mapData.height) {
-      return false;
+      return true;
     }
     const tile = this.mapData.tiles[y * this.mapData.width + x];
     if (this.mapData.blocking_tiles.includes(tile)) return false;
@@ -747,5 +1018,5 @@ export default function GameCanvas({ map, runtime, selectedId, onSelect, onNearb
     window.dispatchEvent(new CustomEvent("hf-runtime", { detail: runtime }));
   }, [runtime]);
 
-  return <div ref={hostRef} className="game-canvas" aria-label="聚落格子地图" />;
+  return <div ref={hostRef} className="game-canvas" aria-label="本地格子地图" />;
 }

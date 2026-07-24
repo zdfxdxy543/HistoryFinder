@@ -24,6 +24,46 @@ def test_geography_is_deterministic():
             "heightmap", "temperature", "rainfall", "rivers", "lakes",
             "flow_accumulation", "biomes", "suitability"):
         assert np.array_equal(getattr(first, layer), getattr(second, layer))
+    assert [item.to_dict(include_cells=True) for item in first.features] == [
+        item.to_dict(include_cells=True) for item in second.features]
+
+
+def test_continuous_geographic_features_receive_unique_rule_based_names(
+        geography):
+    assert {"river", "mountain", "plains"} <= {
+        item.feature_type for item in geography.features}
+    names = [item.name for item in geography.features]
+    assert len(names) == len(set(names))
+    assert all(item.anchor in item.cells for item in geography.features)
+    assert all(item.name_parts for item in geography.features)
+    assert all(item.meaning_tags for item in geography.features)
+
+    valid_biomes = {
+        "river": {"river"},
+        "lake": {"lake"},
+        "mountain": {"mountain", "highland"},
+        "plains": {"plains", "grassland"},
+        "forest": {"forest"},
+        "desert": {"desert", "scrubland"},
+        "tundra": {"tundra"},
+    }
+    for feature in geography.features:
+        assert all(
+            str(geography.biomes[y, x])
+            in valid_biomes[feature.feature_type]
+            for x, y in feature.cells)
+        assert geography.get_features_at(*feature.anchor)
+
+
+def test_nearest_feature_lookup_respects_type_and_distance(geography):
+    feature = next(
+        item for item in geography.features if item.feature_type == "river")
+    found = geography.nearest_features(
+        *feature.anchor, {"river"}, max_distance=0.0, limit=1)
+
+    assert found == [feature]
+    assert not geography.nearest_features(
+        *feature.anchor, {"mountain"}, max_distance=0.0, limit=1)
 
 
 def test_continent_has_ocean_coast_and_varied_relief(geography):

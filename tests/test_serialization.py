@@ -26,6 +26,9 @@ def test_settlement_roundtrip():
         technology_level=0.75,
         food_shortage=0.2,
         infrastructure={"market": 2.0},
+        religious_presence={"religion_0001": 0.8},
+        official_religion_id="religion_0001",
+        religious_tolerance=0.64,
     )
     data = s1.to_dict()
     s2 = Settlement.from_dict(data)
@@ -43,6 +46,9 @@ def test_settlement_roundtrip():
     assert s2.ruler_id == "person_0001"
     assert s2.food_shortage == 0.2
     assert s2.infrastructure == {"market": 2.0}
+    assert s2.religious_presence == {"religion_0001": 0.8}
+    assert s2.official_religion_id == "religion_0001"
+    assert s2.religious_tolerance == 0.64
 
 
 def test_relationship_data_roundtrip():
@@ -175,6 +181,9 @@ def test_world_roundtrip():
     assert len(w2.persons) == len(w1.persons)
     assert w2._pending_disaster_aftermaths == w1._pending_disaster_aftermaths
     assert w2._pending_literary_spreads == w1._pending_literary_spreads
+    assert [item.to_dict(include_cells=True) for item in w2.geography.features] \
+        == [item.to_dict(include_cells=True)
+            for item in w1.geography.features]
 
     # 验证每个 settlement
     for s1 in w1.settlements.values():

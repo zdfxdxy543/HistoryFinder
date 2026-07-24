@@ -116,6 +116,9 @@ class Settlement:
     technology_level: float = 0.0       # [0.0, 10.0]
     relationships: dict[str, RelationshipData] = field(default_factory=dict)
     infrastructure: dict[str, float] = field(default_factory=dict)
+    religious_presence: dict[str, float] = field(default_factory=dict)
+    official_religion_id: Optional[str] = None
+    religious_tolerance: float = 0.72
     active_process_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -151,6 +154,9 @@ class Settlement:
             "technology_level": self.technology_level,
             "relationships": {k: v.to_dict() for k, v in self.relationships.items()},
             "infrastructure": dict(self.infrastructure),
+            "religious_presence": dict(self.religious_presence),
+            "official_religion_id": self.official_religion_id,
+            "religious_tolerance": self.religious_tolerance,
             "active_process_ids": list(self.active_process_ids),
         }
 
@@ -191,6 +197,12 @@ class Settlement:
             technology_level=data.get("technology_level", 0.0),
             relationships=rels,
             infrastructure=dict(data.get("infrastructure", {})),
+            religious_presence={
+                key: float(value)
+                for key, value in data.get("religious_presence", {}).items()
+            },
+            official_religion_id=data.get("official_religion_id"),
+            religious_tolerance=float(data.get("religious_tolerance", 0.72)),
             active_process_ids=data.get("active_process_ids", []),
         )
 

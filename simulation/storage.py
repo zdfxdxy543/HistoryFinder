@@ -49,6 +49,10 @@ OFFICIAL_DOCUMENTS = {
     "trial_record", "omen_record",
 }
 PRIVATE_DOCUMENTS = {"rebel_manifesto", "marriage_contract"}
+RELIGIOUS_DOCUMENTS = {
+    "religious_text", "ritual_calendar", "reformed_liturgy",
+    "reform_decree", "prohibition_edict",
+}
 WORKSHOP_ARTIFACTS = {
     "crafted_item", "demonstration_model", "builders_tools", "reused_fittings",
 } | set(TECHNOLOGY_ARTIFACT_SUBTYPES)
@@ -171,7 +175,7 @@ class StorageManager:
         if evidence.evidence_type == "document":
             if subtype in LIBRARY_DOCUMENTS:
                 return "library_collection"
-            if subtype == "religious_text":
+            if subtype in RELIGIOUS_DOCUMENTS:
                 return "temple_repository"
             if subtype == "trade_ledger":
                 return "merchant_archive"

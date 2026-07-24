@@ -1,18 +1,25 @@
 from game.local_time import LocalTimeSimulation, WEATHER_BY_BIOME
 
 
-def _local_map(*, wall: bool = False) -> dict:
+def _local_map(*, wall: bool = False, water: bool = False,
+               fence: bool = False) -> dict:
     width = 9
     height = 9
     tiles = [0] * (width * height)
     if wall:
         for y in range(height):
             tiles[y * width + 4] = 3
+    if water:
+        for y in range(height):
+            tiles[y * width + 4] = 4
+    if fence:
+        for y in range(height):
+            tiles[y * width + 4] = 17
     return {
         "width": width,
         "height": height,
         "tiles": tiles,
-        "blocking_tiles": [3],
+        "blocking_tiles": [3, 4, 17],
         "player_start": {"x": 2, "y": 4},
         "entities": [],
         "buildings": [],
@@ -77,6 +84,36 @@ def test_walls_are_visible_but_hide_tiles_behind_them():
     assert (4, 4) in visible
     assert (5, 4) not in visible
     assert (3, 4) in visible
+
+
+def test_water_blocks_movement_without_blocking_sight():
+    simulation = LocalTimeSimulation(_local_map(water=True))
+    simulation._weather = lambda: "clear"
+    visible = _coordinates(simulation.snapshot()["visible_tiles"])
+
+    assert (4, 4) in visible
+    assert (5, 4) in visible
+
+    simulation.player = {"x": 3, "y": 4}
+    movement = simulation.move_player(1, 0)
+
+    assert not movement["moved"]
+    assert simulation.player == {"x": 3, "y": 4}
+
+
+def test_fence_blocks_movement_without_blocking_sight():
+    simulation = LocalTimeSimulation(_local_map(fence=True))
+    simulation._weather = lambda: "clear"
+    visible = _coordinates(simulation.snapshot()["visible_tiles"])
+
+    assert (4, 4) in visible
+    assert (5, 4) in visible
+
+    simulation.player = {"x": 3, "y": 4}
+    movement = simulation.move_player(1, 0)
+
+    assert not movement["moved"]
+    assert simulation.player == {"x": 3, "y": 4}
 
 
 def test_explored_tiles_remain_after_the_player_moves():

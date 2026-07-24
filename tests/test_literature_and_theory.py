@@ -19,7 +19,11 @@ from simulation.evidence import Evidence
 from simulation.pressures import tick_economy
 from simulation.settlement import RelationshipData, Settlement
 from simulation.world import World
-from simulation.text_carriers import materialize_text_carrier
+from simulation.text_carriers import (
+    materialize_text_carrier,
+    prepare_materialized_carrier,
+    render_damaged_passages,
+)
 from simulation.technology import TECHNOLOGY_CATALOG, TECHNOLOGY_BY_SUBTYPE
 from simulation.written_content import build_written_content
 
@@ -107,11 +111,11 @@ def test_literary_and_theoretical_works_require_a_library():
         assert condition.check(world, settlement, 1)
 
 
-def test_new_literary_generation_only_uses_chronicle_and_biography():
+def test_new_literary_generation_uses_all_rule_based_genres():
     rule = EventRuleRegistry().rules["literary_work"]
 
     assert {outcome.outcome_type for outcome in rule.possible_outcomes} == {
-        "chronicle", "biography",
+        "chronicle", "biography", "epic", "drama", "lyric_cycle",
     }
 
 
@@ -137,6 +141,128 @@ def test_literary_manuscripts_store_substantial_deterministic_text(genre):
     assert all(marker not in stored_text for marker in (
         "本书讲述", "本章讨论", "第一歌讲述", "第一卷追索",
     ))
+
+
+@pytest.mark.parametrize("genre,expected_structure", [
+    ("epic", "departure"),
+    ("drama", "testimony"),
+    ("lyric_cycle", "refrain"),
+])
+def test_new_genres_store_rule_plan_and_source_links(
+        genre, expected_structure):
+    event = HistoricalEvent(
+        id=f"event_planned_{genre}", year=52,
+        event_type="literary_work", title="planned work",
+        severity=0.2, primary_location="stl_1",
+        details={
+            "work_title": f"白石镇{genre}",
+            "author_name": "沈禾",
+            "genre": genre,
+            "setting_name": "白石镇",
+            "landscape_features": [{
+                "id": "geo_river_1",
+                "name": "三湾鹭水",
+                "feature_type": "river",
+            }],
+            "literary_sources": [{
+                "event_id": "event_flood_1",
+                "year": 43,
+                "event_type": "disaster",
+                "title": "白石镇洪水",
+                "summary": "洪水冲毁旧桥，居民把粮食转移到高地。",
+                "participant_names": ["白石镇"],
+                "person_names": ["林岑"],
+                "importance_score": 0.8,
+            }],
+        },
+    )
+
+    written = build_written_content(
+        event, "literary_manuscript", 903, f"evd_planned_{genre}")
+    plan = written["composition_plan"]
+    body = [
+        passage for passage in written["passages"]
+        if passage["kind"] == "body"
+    ]
+
+    assert expected_structure in plan["structure"]
+    assert plan["primary_theme"] == "灾变生存"
+    assert plan["secondary_themes"]
+    assert plan["source_event_ids"] == ["event_flood_1"]
+    assert any(
+        passage.get("source_event_id") == "event_flood_1"
+        for passage in body
+    )
+    assert all(passage.get("literary_unit") for passage in body)
+    assert all(passage.get("semantic_tags") for passage in body)
+
+
+@pytest.mark.parametrize("genre", ["epic", "drama", "lyric_cycle"])
+def test_new_genres_do_not_emit_legacy_complete_sentences(genre):
+    event = HistoricalEvent(
+        id=f"event_no_legacy_{genre}", year=20,
+        event_type="literary_work", title="new rules",
+        severity=0.2, primary_location="stl_1",
+        details={
+            "work_title": "新规则作品",
+            "author_name": "沈禾",
+            "genre": genre,
+            "setting_name": "白石镇",
+        },
+    )
+
+    written = build_written_content(
+        event, "literary_manuscript", 904, f"evd_no_legacy_{genre}")
+    text = "\n".join(item["text"] for item in written["passages"])
+
+    assert all(old_sentence not in text for old_sentence in (
+        "母亲们数脚步，不数号角",
+        "我听见了三短一长的钟声",
+        "最早醒来的人没有留下姓名",
+        "秤盘还在轻轻摇晃",
+    ))
+
+
+@pytest.mark.parametrize("genre", ["epic", "drama", "lyric_cycle"])
+def test_world_creates_new_genres_with_grounded_titles_and_landscapes(genre):
+    world = World(seed=905)
+    world.generate(years=0)
+    settlement = next(iter(world.settlements.values()))
+    source = HistoricalEvent(
+        id=f"event_title_source_{genre}", year=3, event_type="war",
+        title=f"{settlement.name}守住道路",
+        severity=0.7, primary_location=settlement.id,
+        participants=[settlement.id],
+        details={"description_cn": f"3年，{settlement.name}守住了道路。"},
+        importance_score=0.8, visibility_score=0.8,
+    )
+    world._add_event(source)
+    rule = EventRuleRegistry().rules["literary_work"]
+    outcome = next(
+        item for item in rule.possible_outcomes
+        if item.outcome_type == genre
+    )
+    result = EventRuleResult(
+        rule=rule, settlement=settlement, total_score=1.0,
+        trigger_factors={}, selected_outcome=outcome,
+        concrete_effects=[],
+    )
+    event = HistoricalEvent(
+        id=f"event_world_{genre}", year=12,
+        event_type="literary_work", title="new work", severity=0.2,
+        primary_location=settlement.id, participants=[settlement.id],
+    )
+
+    world._attach_people_to_rule_event(event, result, settlement, 12, {})
+    written = build_written_content(
+        event, "literary_manuscript", 905, f"evd_world_{genre}")
+
+    assert event.details["genre"] == genre
+    assert "战乱" in event.details["work_title"]
+    assert event.details["landscape_features"]
+    assert written["composition_plan"]["genre"] == genre
+    assert source.title in "\n".join(
+        passage["text"] for passage in written["passages"])
 
 
 @pytest.mark.parametrize("genre", ["chronicle", "biography"])
@@ -176,6 +302,94 @@ def test_grounded_literature_does_not_append_fixed_explanatory_tail(genre):
         "编排说明", "人物说明", "地点说明", "年份说明",
         "来源说明", "增补说明", "综合上述记录", "后续版本",
     ))
+
+
+def test_grounded_literature_persists_a_fact_bound_composition_plan():
+    event = HistoricalEvent(
+        id="event_planned_literature", year=31,
+        event_type="literary_work", title="planned work",
+        severity=0.2, primary_location="stl_1",
+        details={
+            "work_title": "鹭水灾变记",
+            "author_name": "沈禾",
+            "genre": "chronicle",
+            "setting_name": "白石镇",
+            "landscape_features": [{
+                "id": "geo_river_1",
+                "name": "三湾鹭水",
+                "feature_type": "river",
+            }],
+            "literary_sources": [{
+                "event_id": "event_flood_1",
+                "year": 22,
+                "event_type": "disaster",
+                "title": "白石镇洪水",
+                "summary": "洪水冲坏旧桥，居民把粮食转移到高地。",
+                "participant_names": ["白石镇"],
+                "person_names": ["林岑"],
+            }],
+        },
+    )
+
+    written = build_written_content(
+        event, "literary_manuscript", 901, "evd_planned_literature")
+    plan = written["composition_plan"]
+
+    assert plan["genre"] == "chronicle"
+    assert plan["source_event_ids"] == ["event_flood_1"]
+    assert plan["landscape_names"] == ["三湾鹭水"]
+    assert plan["central_image"] in {"水痕", "渡口旧桩", "回水湾", "湿润桥石"}
+    source_passages = [
+        passage for passage in written["passages"]
+        if passage.get("source_event_id") == "event_flood_1"
+    ]
+    assert len(source_passages) == 2
+    assert all(passage.get("semantic_tags") for passage in source_passages)
+
+
+@pytest.mark.parametrize(
+    "genre", ["chronicle", "epic", "drama", "lyric_cycle"])
+def test_rule_generated_literature_uses_persistent_carrier_damage(genre):
+    event = HistoricalEvent(
+        id=f"event_damaged_literature_{genre}", year=31,
+        event_type="literary_work", title="damaged work",
+        severity=0.2, primary_location="stl_1",
+        details={
+            "work_title": "旧桥记",
+            "author_name": "沈禾",
+            "genre": genre,
+            "setting_name": "白石镇",
+            "literary_sources": [{
+                "event_id": "event_bridge_1",
+                "year": 22,
+                "event_type": "reconstruction",
+                "title": "白石镇重建旧桥",
+                "summary": "石匠重新立起桥墩，并保留了一段旧桥面。",
+                "participant_names": ["白石镇"],
+                "person_names": ["林岑"],
+            }],
+        },
+    )
+    written = build_written_content(
+        event, "literary_manuscript", 902,
+        f"evd_damaged_literature_{genre}")
+    evidence = Evidence(
+        id=f"evd_damaged_literature_{genre}", event_id=event.id,
+        evidence_type="document", subtype="literary_manuscript",
+        location_type="settlement", location_id="stl_1",
+        created_year=31, material="paper",
+        max_durability=100, current_durability=20,
+        content_data={}, physical_features={"tags": []},
+    )
+
+    prepare_materialized_carrier(evidence, written)
+    visible, readability = render_damaged_passages(evidence)
+
+    assert evidence.content_data["written_content"]["composition_plan"] \
+        == written["composition_plan"]
+    assert evidence.content_data["damage_state"]["lesions"]
+    assert readability < 1.0
+    assert any("〔" in passage and "〕" in passage for passage in visible)
 
 
 @pytest.mark.parametrize("genre,expected_marker", [

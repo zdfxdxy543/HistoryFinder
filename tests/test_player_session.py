@@ -19,6 +19,7 @@ from game.local_map import (
     build_evidence_targets,
 )
 from game.local_time import BREAK_PLACE_TYPES
+from simulation.effects import DamageBuilding, ModifyInfrastructure
 from simulation.world import World
 
 
@@ -182,6 +183,71 @@ def test_local_map_contains_living_buildings_and_ordinary_residents(
     assert informant_ids.isdisjoint(item["id"] for item in residents)
 
 
+def test_development_events_create_real_local_map_buildings():
+    world = World(seed=451)
+    world.generate(years=0)
+    settlement = next(iter(world.settlements.values()))
+    settlement.size = "city"
+    settlement.population = max(settlement.population, 2200)
+    settlement.peak_population = max(settlement.peak_population, 2200)
+
+    for infrastructure_type in (
+            "temple", "library", "market", "fortification", "aqueduct",
+            "palace"):
+        result = ModifyInfrastructure(
+            settlement.id, infrastructure_type, 1.0,
+            reason="test_construction").apply(world)
+        assert result.success
+
+    local_map = LocalMapBuilder().build(world, settlement)
+    projected = {
+        item["infrastructure_type"]: item
+        for item in local_map["buildings"]
+        if item["infrastructure_type"]
+    }
+
+    expected_types = {
+        "temple", "library", "market", "fortification", "aqueduct",
+        "palace",
+    }
+    assert expected_types <= set(projected)
+    assert projected["library"]["building_type"] == "library"
+    assert projected["library"]["name"] == "图书馆"
+    assert projected["market"]["building_type"] == "great_market"
+    assert all(projected[item_type]["condition"] == "intact"
+               for item_type in expected_types)
+    assert all(projected[item_type]["infrastructure_level"] == 1.0
+               for item_type in expected_types)
+    assert "market" in {
+        item["building_type"] for item in local_map["buildings"]}
+
+
+def test_destroyed_infrastructure_remains_as_ruin_on_local_map():
+    world = World(seed=452)
+    world.generate(years=0)
+    settlement = next(iter(world.settlements.values()))
+    settlement.size = "town"
+    settlement.population = max(settlement.population, 800)
+    settlement.peak_population = max(settlement.peak_population, 800)
+    ModifyInfrastructure(
+        settlement.id, "library", 1.0,
+        reason="test_construction").apply(world)
+    DamageBuilding(
+        settlement.id, "library", 1.0,
+        reason="test_destruction").apply(world)
+
+    local_map = LocalMapBuilder().build(world, settlement)
+    library = next(
+        item for item in local_map["buildings"]
+        if item["infrastructure_type"] == "library")
+
+    assert settlement.infrastructure["library"] == 0.0
+    assert library["building_type"] == "library"
+    assert library["condition"] == "ruined"
+    assert library["infrastructure_level"] == 0.0
+    assert library["name"] == "废弃的图书馆"
+
+
 def test_search_discovers_every_surviving_physical_item_at_location(
         player_session):
     first_evidence_id = next(
@@ -318,6 +384,41 @@ def test_documents_use_fixtures_and_in_situ_evidence_stays_on_map():
                     "bookshelf", "archive_cabinet", "scroll_chest",
                     "ledger_shelf", "document_chest",
                 }
+
+
+def test_library_and_temple_containers_fall_back_to_archive_building():
+    world = World(seed=400)
+    world.generate(years=30)
+    settlement = next(
+        item for item in world.settlements.values()
+        if {"library_collection", "temple_repository"} <= {
+            site.site_type for site in world.storage_sites.values()
+            if site.settlement_id == item.id and site.alive
+        }
+        and "library" not in item.infrastructure
+        and "temple" not in item.infrastructure
+    )
+    local_map = LocalMapBuilder().build(world, settlement)
+    archive = next(
+        item for item in local_map["buildings"]
+        if item["building_type"] == "archive")
+    assert not any(
+        item["building_type"] in {"library", "temple"}
+        for item in local_map["buildings"])
+
+    fallback_containers = [
+        item for item in local_map["entities"]
+        if item["kind"] == "container"
+        and item["storage_site_id"] in world.storage_sites
+        and world.storage_sites[item["storage_site_id"]].site_type
+        in {"library_collection", "temple_repository"}
+    ]
+    assert {item["placement_kind"] for item in fallback_containers} >= {
+        "bookshelf", "scroll_chest"}
+    left, top, right, bottom = archive["bounds"]
+    assert all(
+        left < item["x"] < right and top < item["y"] < bottom
+        for item in fallback_containers)
 
 
 def test_talking_to_resident_is_safe_and_does_not_create_claims(player_session):
@@ -635,6 +736,57 @@ def test_wait_and_investigation_actions_have_explicit_duration():
     assert len(positions) == len(examined["runtime"]["npcs"])
 
 
+def test_first_cheat_unlocks_optional_full_map_vision():
+    world = World(seed=421)
+    world.generate(years=0)
+    session = PlayerSession(world)
+    tile_count = session.local_map["width"] * session.local_map["height"]
+    normal_visible = len(session.local_time.snapshot()["visible_tiles"])
+
+    unlocked = session.enter_cheat_code("hf-vision")
+
+    assert unlocked["cheats"]["full_map_vision"] == {
+        "unlocked": True,
+        "enabled": False,
+    }
+    assert len(unlocked["runtime"]["visible_tiles"]) == normal_visible
+
+    enabled = session.set_cheat("full_map_vision", True)
+
+    assert enabled["runtime"]["full_map_vision"] is True
+    assert len(enabled["runtime"]["visible_tiles"]) == tile_count
+    assert len(enabled["runtime"]["explored_tiles"]) < tile_count
+
+    disabled = session.set_cheat("full_map_vision", False)
+
+    assert disabled["runtime"]["full_map_vision"] is False
+    assert len(disabled["runtime"]["visible_tiles"]) < tile_count
+
+
+def test_full_map_vision_requires_the_cheat_code_and_survives_travel():
+    world = World(seed=422)
+    world.generate(years=0)
+    session = PlayerSession(world)
+
+    with pytest.raises(PlayerActionError, match="尚未解锁"):
+        session.set_cheat("full_map_vision", True)
+    with pytest.raises(PlayerActionError, match="作弊码无效"):
+        session.enter_cheat_code("wrong-code")
+
+    session.enter_cheat_code("HF-VISION")
+    session.set_cheat("full_map_vision", True)
+    destination_id = next(
+        item.id for item in world.settlements.values()
+        if item.id != session.current_location_id)
+
+    traveled = session.travel(destination_id)
+    runtime = traveled["location"]["runtime"]
+
+    assert runtime["full_map_vision"] is True
+    assert len(runtime["visible_tiles"]) == (
+        session.local_map["width"] * session.local_map["height"])
+
+
 def test_world_map_travel_loads_and_reuses_local_maps():
     world = World(seed=419)
     world.generate(years=0)
@@ -658,6 +810,24 @@ def test_world_map_travel_loads_and_reuses_local_maps():
     assert session.local_map is origin_map
 
 
+def test_world_map_travel_restores_explored_tiles_for_each_local_map():
+    world = World(seed=419)
+    world.generate(years=0)
+    session = PlayerSession(world)
+    session.bootstrap()
+    origin_id = session.current_location_id
+    destination_id = next(
+        item.id for item in world.settlements.values()
+        if item.id != origin_id)
+    remembered = set(session.local_time._explored_cells)
+    assert remembered
+
+    session.travel(destination_id)
+    session.travel(origin_id)
+
+    assert remembered <= session.local_time._explored_cells
+
+
 def test_world_map_exposes_public_territories_without_polity_ids():
     world = World(seed=419)
     world.generate(years=0)
@@ -677,6 +847,21 @@ def test_world_map_exposes_public_territories_without_polity_ids():
     assert "controller_polity_id" not in set(_all_keys(world_map))
 
 
+def test_world_map_exposes_named_geographic_features():
+    world = World(seed=42)
+    world.generate(years=0)
+    world_map = PlayerSession(world).bootstrap()["world_map"]
+    features = world_map["geographic_features"]
+
+    assert features
+    assert {"river", "mountain", "plains"} <= {
+        item["feature_type"] for item in features}
+    assert len({item["name"] for item in features}) == len(features)
+    assert all(0 <= item["x"] < world_map["width"] for item in features)
+    assert all(0 <= item["y"] < world_map["height"] for item in features)
+    assert all(item["min_zoom"] >= 1.0 for item in features)
+
+
 def test_destroyed_settlement_loads_as_walkable_ruin_with_search_sites():
     world = World(seed=420)
     world.generate(years=0)
@@ -687,12 +872,11 @@ def test_destroyed_settlement_loads_as_walkable_ruin_with_search_sites():
     ruin.alive = False
     ruin.destroyed_year = world.current_year
 
-    traveled = session.travel(ruin.id)
-    local_map = traveled["location"]["local_map"]
+    ruin_session = PlayerSession(world, ruin.id)
+    local_map = ruin_session.local_map
     blocking = set(local_map["blocking_tiles"])
 
     assert local_map["site_type"] == "ruin"
-    assert traveled["destination"]["site_type"] == "ruin"
     survivors = [
         item for item in local_map["entities"]
         if item["kind"] == "resident"]

@@ -140,28 +140,41 @@ export default function WorldMapView({ map, busy, onTravel }: Props) {
         });
       });
     }
-    context.strokeStyle = "rgba(79, 65, 47, 0.48)";
-    context.lineWidth = 1.5;
-    const linked = new Set<string>();
-    map.locations.forEach((location) => {
-      const nearest = map.locations
-        .filter((item) => item.id !== location.id)
-        .sort((a, b) => distance(location, a) - distance(location, b))[0];
-      if (!nearest) return;
-      const key = [location.id, nearest.id].sort().join("|");
-      if (linked.has(key)) return;
-      linked.add(key);
+    context.strokeStyle = "rgba(103, 76, 43, 0.82)";
+    context.lineWidth = 2;
+    map.routes.forEach((route) => {
+      if (route.path.length < 2) return;
       context.beginPath();
-      context.moveTo((location.x + 0.5) * scale, (location.y + 0.5) * scale);
-      context.lineTo((nearest.x + 0.5) * scale, (nearest.y + 0.5) * scale);
+      route.path.forEach((cell, index) => {
+        const px = (cell.x + 0.5) * scale;
+        const py = (cell.y + 0.5) * scale;
+        if (index === 0) context.moveTo(px, py);
+        else context.lineTo(px, py);
+      });
       context.stroke();
     });
+    if (!map.current_location_id) {
+      context.strokeStyle = "#fff0ca";
+      context.lineWidth = 2;
+      context.strokeRect(
+        map.current_cell.x * scale + 1,
+        map.current_cell.y * scale + 1,
+        scale - 2,
+        scale - 2,
+      );
+    }
   }, [map, showTerritories]);
 
   const travelMinutes = useMemo(() => {
-    if (!current || !selected) return 0;
-    return Math.max(60, Math.ceil(distance(current, selected) * 45 / 5) * 5);
-  }, [current, selected]);
+    if (!selected) return 0;
+    const distanceInCells = current
+      ? distance(current, selected)
+      : Math.hypot(
+        selected.x - map.current_cell.x,
+        selected.y - map.current_cell.y,
+      );
+    return Math.max(60, Math.ceil(distanceInCells * 45 / 5) * 5);
+  }, [current, selected, map.current_cell]);
 
   const changeZoom = (nextZoom: number, anchor?: { x: number; y: number }) => {
     setView((current) => {
@@ -281,6 +294,22 @@ export default function WorldMapView({ map, busy, onTravel }: Props) {
             }}
           >
             <canvas ref={canvasRef} />
+            {map.geographic_features
+              .filter((feature) => view.zoom >= feature.min_zoom)
+              .map((feature) => (
+                <span
+                  className={`world-feature-label ${feature.feature_type}`}
+                  key={feature.id}
+                  style={{
+                    left: `${((feature.x + 0.5) / map.width) * 100}%`,
+                    top: `${((feature.y + 0.5) / map.height) * 100}%`,
+                    transform: `translate(-50%, -50%) scale(${1 / view.zoom})`,
+                  }}
+                  title={`${feature.feature_type_name} · ${feature.name}`}
+                >
+                  {feature.name}
+                </span>
+              ))}
             {map.locations.map((location) => {
               const isCurrent = location.id === map.current_location_id;
               const active = location.id === selectedId;
@@ -333,7 +362,7 @@ export default function WorldMapView({ map, busy, onTravel }: Props) {
             </span>
           )}
         </header>
-        {selected && selected.id !== map.current_location_id && (
+        {selected && selected.site_type === "settlement" && selected.id !== map.current_location_id && (
           <div className="travel-command">
             <div><small>预计行程</small><strong>{formatDuration(travelMinutes)}</strong></div>
             <button className="command-button primary" disabled={busy} onClick={() => onTravel(selected.id)}>

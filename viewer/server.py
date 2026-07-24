@@ -84,6 +84,9 @@ class PlayerSessionStore:
                 )
             if action == "talk":
                 return session.talk(str(payload.get("resident_id", "")))
+            if action == "inspect_wilderness":
+                return session.inspect_wilderness(
+                    str(payload.get("entity_id", "")))
             if action == "search_container":
                 return session.search_container(
                     str(payload.get("container_id", "")))
@@ -96,6 +99,16 @@ class PlayerSessionStore:
                 return session.travel(str(payload.get("destination_id", "")))
             if action == "journal":
                 return {"action": "journal", "journal": session.journal_payload()}
+            if action == "enter_cheat":
+                return session.enter_cheat_code(str(payload.get("code", "")))
+            if action == "set_cheat":
+                enabled = payload.get("enabled")
+                if not isinstance(enabled, bool):
+                    raise PlayerActionError("作弊选项状态必须是布尔值。")
+                return session.set_cheat(
+                    str(payload.get("cheat_id", "")),
+                    enabled,
+                )
             raise PlayerActionError("无法识别这个调查动作。")
 
 

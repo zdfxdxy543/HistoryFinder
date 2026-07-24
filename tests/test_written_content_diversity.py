@@ -8,6 +8,7 @@ from simulation.world import World
 from simulation.events import HistoricalEvent
 from simulation.text_carriers import materialize_text_carrier
 from simulation.written_content import build_written_content
+from simulation.religion import changed_profile_dimensions
 
 
 @pytest.fixture(scope="module")
@@ -178,3 +179,86 @@ def test_rule_documents_receive_specific_outcome_fields(written_world):
         heading = item.content_data["written_content"]["passages"][0]["text"]
         assert event.details["building_type"] == event.details["outcome_type"]
         assert "一处公共建筑" not in heading
+
+
+def test_religious_documents_are_composed_from_tradition_profiles():
+    world = World(seed=470)
+    world.generate(years=0)
+    religions = list(world.religions.values())[:2]
+    texts = []
+    for index, religion in enumerate(religions):
+        event = HistoricalEvent(
+            id=f"religious_text_{index}", year=12,
+            event_type="construction", title="神殿文书",
+            severity=0.1, primary_location="stl_1",
+            details={
+                "religion_name": religion.name,
+                "religion_profile": religion.text_profile(),
+            },
+        )
+        first = build_written_content(
+            event, "religious_text", 470, f"religious_evidence_{index}")
+        second = build_written_content(
+            event, "religious_text", 470, f"religious_evidence_{index}")
+        assert first == second
+        text = "\n".join(item["text"] for item in first["passages"])
+        assert religion.sacred_focus in text
+        assert religion.offering in text
+        assert religion.congregation_response in text
+        texts.append(text)
+
+    assert texts[0] != texts[1]
+    first_lines = set(texts[0].splitlines()[1:-1])
+    second_lines = set(texts[1].splitlines()[1:-1])
+    assert len(first_lines & second_lines) / max(
+        1, len(first_lines | second_lines)) < 0.25
+
+
+def test_reform_documents_name_actual_profile_changes():
+    world = World(seed=471)
+    world.generate(years=0)
+    settlement = next(iter(world.settlements.values()))
+    parent = world.religions[settlement.official_religion_id]
+    reformed = world._religion_mgr.create_reform(
+        parent, settlement, 9, "主持次序存在争议")
+    event = world._event_gen.generate_religious_reform_event(
+        9, settlement.id, settlement.name, parent, reformed)
+    content = build_written_content(
+        event, "reformed_liturgy", 471, "reform_evidence")
+    text = "\n".join(item["text"] for item in content["passages"])
+    changed = changed_profile_dimensions(
+        parent.text_profile(), reformed.text_profile())
+
+    assert event.details["changed_dimensions"] == changed
+    assert changed
+    assert any(
+        str(parent.text_profile()[field]) in text
+        or any(str(value) in text for value in (
+            parent.text_profile()[field]
+            if isinstance(parent.text_profile()[field], list) else []))
+        for field in changed
+    )
+    assert any(
+        str(reformed.text_profile()[field]) in text
+        or any(str(value) in text for value in (
+            reformed.text_profile()[field]
+            if isinstance(reformed.text_profile()[field], list) else []))
+        for field in changed
+    )
+
+
+def test_old_fixed_religious_document_sentences_are_absent(written_world):
+    forbidden = (
+        "本季主要仪式为",
+        "旧抄本应送交经库核对",
+        "被收存的经卷和仪式用品列入清单",
+    )
+    religious_subtypes = {
+        "religious_text", "ritual_calendar", "reformed_liturgy",
+        "reform_decree", "prohibition_edict", "hymn", "revised_hymn",
+        "forbidden_hymn", "festival_song",
+    }
+    for evidence in _documents(written_world):
+        if evidence.subtype.removesuffix("_copy") in religious_subtypes:
+            assert all(marker not in _full_text(evidence)
+                       for marker in forbidden)

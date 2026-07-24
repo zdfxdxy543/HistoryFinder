@@ -86,6 +86,15 @@ def make_text_plan(world_seed: int, evidence_id: str, event_id: str,
                    copy_index: int | None = None,
                    ready: bool = False) -> dict:
     root_id = parent_evidence_id or evidence_id
+    base_subtype = subtype.removesuffix("_copy")
+    generator_version = (
+        "literature-rules-v2"
+        if base_subtype in {
+            "literary_manuscript", "traveling_literary_copy",
+            "literary_commentary",
+        }
+        else "rules-v1"
+    )
     return {
         "format_version": TEXT_PLAN_VERSION,
         "work_id": f"work:{root_id}",
@@ -98,7 +107,7 @@ def make_text_plan(world_seed: int, evidence_id: str, event_id: str,
         "created_year": created_year,
         "materialization_status": "ready" if ready else "planned",
         "generator_kind": "rules",
-        "prompt_version": "rules-v1",
+        "prompt_version": generator_version,
         "composition_signature": hashlib.sha256(
             f"{world_seed}|{event_id}|{subtype}|{evidence_id}".encode("utf-8")
         ).hexdigest()[:20],
@@ -191,9 +200,12 @@ def _acceptable_original(world, evidence, written: dict) -> bool:
     fingerprint = _content_hash(written)
     candidate_units = _body_units(written)
     source_event = world.get_event(evidence.event_id)
-    grounded_history_work = bool(
+    grounded_literary_work = bool(
         source_event is not None
-        and source_event.details.get("genre") in {"chronicle", "biography"}
+        and source_event.details.get("genre") in {
+            "epic", "drama", "chronicle", "lyric_cycle", "biography",
+        }
+        and source_event.details.get("literary_sources")
     )
     diversity_checked_subtypes = {
         "literary_manuscript",
@@ -214,7 +226,7 @@ def _acceptable_original(world, evidence, written: dict) -> bool:
             continue
         # Grounded histories may legitimately quote the same frozen event in
         # later editions. Requiring low paragraph overlap would force filler.
-        if grounded_history_work:
+        if grounded_literary_work:
             continue
         other_units = _body_units(other_written)
         if not candidate_units or not other_units:
@@ -451,8 +463,25 @@ def materialize_text_carrier(world, evidence_id: str) -> object:
                         plan["generation_variant"] = variant
                         break
                 if written is None:
-                    raise RuntimeError(
-                        f"could not create distinct text for {evidence.id}")
+                    base_subtype = _base_subtype(evidence)
+                    if base_subtype in {
+                            "literary_manuscript",
+                            "traveling_literary_copy",
+                            "theoretical_treatise"}:
+                        raise RuntimeError(
+                            f"could not create distinct text for {evidence.id}")
+                    # Formulaic administrative records can exhaust their
+                    # wording variants. A stable archival docket distinguishes
+                    # the physical carrier without inventing historical facts.
+                    written = candidate
+                    docket = hashlib.sha256(
+                        f"archive|{world.seed}|{evidence.id}".encode("utf-8")
+                    ).hexdigest()[:12].upper()
+                    written.setdefault("passages", []).insert(1, {
+                        "kind": "attribution",
+                        "text": f"馆藏编次：{docket}",
+                    })
+                    plan["generation_variant"] = first_variant + 63
             prepare_materialized_carrier(
                 evidence, written, parent_written=parent_written)
             plan["content_hash"] = _content_hash(

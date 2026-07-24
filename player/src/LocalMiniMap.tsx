@@ -6,6 +6,7 @@ const TILE_COLORS = [
   0x676861, 0x755f48, 0x846a4b, 0xb7a47f, 0xc19a72,
   0xc5ad72, 0x355f43, 0x6f746d, 0x7f8c52, 0x8c7350,
   0xaeb5aa, 0x526f61,
+  0x806b4c,
 ];
 
 type Props = {
@@ -77,7 +78,13 @@ export default function LocalMiniMap({ map, runtime }: Props) {
           ? "#a68b64" : "#e0b66e"
         : entity.kind === "evidence"
           ? entity.placement_kind === "structural" ? "#d3d0c4" : "#f1d998"
-          : entity.kind === "informant" ? "#d9a84f" : "#c8ddd0";
+          : entity.kind === "informant" ? "#d9a84f"
+          : entity.kind === "landmark" ? "#e1c477"
+          : entity.kind === "camp" ? "#c8753d"
+          : entity.kind === "trace" ? "#a27a52"
+          : entity.kind === "wildlife" ? "#7fa65d"
+          : entity.kind === "caravan" ? "#4e91a2"
+          : entity.kind === "traveler" ? "#b68b54" : "#c8ddd0";
       context.fillRect(position.x - 1, position.y - 1, 3, 3);
     });
     context.fillStyle = "#d94f45";

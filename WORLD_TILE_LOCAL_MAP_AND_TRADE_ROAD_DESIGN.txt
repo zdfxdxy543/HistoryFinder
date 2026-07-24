@@ -1,0 +1,520 @@
+HistoryFinder 世界格本地地图与通商道路开发报告
+================================================
+
+文档状态
+--------
+
+本文是“每个世界格对应一张本地地图、通过地图边缘连续移动、自然地貌跨格连续、
+聚落通商后形成道路”的实现规格。结论是：该功能可以实现，但它不是对现有
+LocalMapBuilder 的一次局部扩展，而是模拟层、玩家会话、服务接口和前端共同参与的
+结构升级。
+
+本文中的“可快速旅行聚落”默认指仍然存续的 village、town、city；废墟和没有聚落的
+格子不能从世界地图点击进入。若产品语义中的“城镇”严格只指 size == "town"，应在
+实现前单独调整该规则，不能让术语歧义隐式改变玩法。
+
+
+一、需求结论
+============
+
+必须实现
+--------
+
+1. 200 x 200 世界地图中的每个格子都有确定的本地地图，但不预生成 40000 张地图。
+2. 玩家首次进入世界格时按 seed 和格坐标懒生成；再次进入时读取同一张地图状态。
+3. 玩家从本地地图边缘继续移动时进入相邻世界格，并从相邻地图对应边缘出现。
+4. 只有现存聚落标记可在世界地图上触发快速旅行。
+5. 废墟和荒野格只能通过本地移动进入；海洋、湖泊在没有水上移动能力时不可步行进入。
+6. 河流、湖岸、海岸、山脊等景观在相邻地图边界处位置和走向一致。
+7. 聚落首次建立正式贸易关系后，在世界层创建一条持久的贸易路线。
+8. 贸易路线经过的每张本地地图都显示连续道路；道路合理绕避地形并处理桥、渡口和山口。
+9. 路线建立前已生成的地图必须能追加道路；未生成地图在首次生成时直接包含道路。
+10. 固定 seed、相同世界状态和相同格坐标必须生成完全一致的基础地图。
+11. 世界路线、已生成地图和玩家对地图造成的持久变化必须支持序列化。
+
+首期不实现
+----------
+
+1. 船只、港口航线和海上逐格移动。
+2. 道路逐年施工动画、道路容量、拥堵和商队经济模拟。
+3. 完整道路损毁、维护预算和废弃植被演化；首期只保留 status 扩展位。
+4. 同一世界格内的地下城、多楼层或多个独立场景。
+5. 一次性预生成全部世界格本地地图。
+
+
+二、现有程序评估
+================
+
+1. simulation/geography.py 已经提供可用的宏观地理真值
+------------------------------------------------------
+
+Geography 当前生成 heightmap、temperature、rainfall、rivers、lakes、
+flow_accumulation、biomes 和 suitability。河流通过 priority-flood 和流量累积生成，
+tests/test_geography.py 已验证宏观河网的确定性和连通性。
+
+可以保留这套宏观管线，但当前 generate_hydrology() 没有把每格下游方向保存在
+Geography 中。本地河段要准确知道从哪条边进入、从哪条边流出，因此需要增加
+downstream_x、downstream_y 或等价的 river_connections 图层。
+
+2. game/local_map.py 目前只会生成“聚落地图”
+--------------------------------------------
+
+LocalMapBuilder.build(world, settlement) 强制要求 Settlement。地图尺寸由聚落人口决定，
+site_type 只有 settlement 和 ruin。地貌采样以聚落为中心跨越约 12 x 10 个世界格，
+这与“一个世界格对应一张本地地图”的新坐标语义冲突。
+
+当前入口方向取最近的四个聚落并补足三个方向，道路则从这些入口通向聚落中心。
+这些入口和道路没有使用真实贸易关系，也不保证相邻本地地图边缘对接。该代码可保留
+建筑、区域、证物、NPC 和聚落内部路网部分，但地貌、外部入口和道路生成必须拆分。
+
+3. game/player_session.py 目前把当前位置等同于聚落 ID
+---------------------------------------------------
+
+PlayerSession.current_location_id、_location_payload()、证物和知情人查询都假设当前位置
+一定存在 Settlement。_local_maps 也只以 settlement_id 缓存在当前服务进程内。
+
+travel() 当前允许前往现存聚落和废墟，并按两聚落直线距离计时。move() 只在当前本地
+地图内移动，无法处理越界。这里是本功能最大的玩家流程改动点。
+
+4. game/local_time.py 当前将地图外视为不可行走
+----------------------------------------------
+
+LocalTimeSimulation.move_player() 调用 _is_walkable()；坐标越界直接返回 False。
+需要把“撞到阻挡物”和“从合法出口越过地图边界”区分为两种结果，由 PlayerSession
+执行跨格切换。NPC 仍应限制在当前地图内，首期不随玩家跨格迁移。
+
+5. simulation/settlement.py 和 event_rules.py 已有通商触发点
+--------------------------------------------------------
+
+RelationshipData 已保存 trade_volume。trade_opened 事件通过 ModifyRelationship 将双方
+trade_volume 增加 40，并明确表示“两地之间的商路正式开通”。这是创建道路的正确领域
+触发点，不需要再发明一套与历史模拟脱节的贸易判定。
+
+6. 世界地图前端当前绘制的是装饰连线
+------------------------------------
+
+player/src/WorldMapView.tsx 会让每个聚落连接最近聚落，连线不代表贸易，也没有沿世界格
+寻路。它必须改为绘制后端提供的真实 route path。当前世界地图允许废墟触发 travel，
+也必须收紧为只允许现存聚落。
+
+7. 存档目前不包含本地地图和路线
+--------------------------------
+
+World.to_dict() 使用 schema 12，不保存 Geography 数组，而是在读档时由 seed 重建。
+PlayerSession 没有正式存档格式。为了满足“首次生成、之后读取”，仅使用当前的内存
+_local_maps 不够；需要增加可序列化的懒生成地图仓库，同时把玩家探索状态与世界地图
+基础状态分开。
+
+
+三、推荐架构
+============
+
+1. 统一世界格标识
+----------------
+
+新增不可歧义的 CellCoord：
+
+    cell_key = "x,y"
+
+PlayerSession 改为保存：
+
+- current_cell: (x, y)
+- current_settlement_id: Optional[str]
+- current_map_key: str
+
+Settlement 继续保存 grid_x、grid_y。通过 World.get_settlement_at(x, y) 查询格内聚落，
+不要在荒野格伪造 Settlement。
+
+2. 固定本地坐标尺度
+------------------
+
+所有世界格使用相同的基础尺寸，建议首期采用 64 x 64。聚落建筑密度随人口改变，但地图
+物理尺寸不再随人口改变，否则相邻边界坐标无法一一对应。
+
+共享边界采用 0..63 的 edge_offset。东侧 offset == 17 与东邻格西侧 offset == 17
+严格表示同一个连接点。地图入口、河流端口、道路端口都使用这个规则。
+
+3. 边界契约 EdgeContract
+------------------------
+
+任何跨格连续要素都先在世界层产生共享边界契约，再由本地生成器连接契约中的端口。
+建议结构：
+
+    EdgePortal {
+        feature_type: river | coast | ridge | road,
+        edge: north | south | east | west,
+        offset: int,
+        width: int,
+        feature_id: str,
+        direction: in | out | bidirectional
+    }
+
+相邻两格不能各自随机端口。端口必须由规范化边界键生成：
+
+    (world_seed, min(cell_a, cell_b), max(cell_a, cell_b), feature_id)
+
+同一边界只计算一次，双方使用镜像结果。这样生成顺序不会影响连续性。
+
+4. 连续自然地貌
+--------------
+
+河流：
+
+- 从 Geography 的 river_connections 推导跨格入口和出口。
+- 在格内使用有约束路径连接河流端口。
+- 路径宽度由 flow_accumulation 决定，并在共享边界使用相同宽度。
+- 分叉格允许多个上游端口连接一个下游端口。
+
+山脉和高程：
+
+- 本地高程必须采样连续的全局坐标场，而不是以 settlement_id 生成独立相位。
+- 相邻地图共享边界上的高程采样坐标完全相同。
+- 山脊方向由世界 heightmap 梯度、邻格 mountain/highland 分布和连续噪声共同决定。
+- 山脊是区域，不强制每个 mountain 格只有一条中心线。
+
+海岸和湖岸：
+
+- land/water 邻接直接产生边界水域约束。
+- 海洋或湖泊格仍有确定地图，但没有水上能力时拒绝从陆地步行进入。
+
+5. 本地地图生成管线
+------------------
+
+建议拆分当前 LocalMapBuilder：
+
+    WorldCellMapBuilder.build(world, x, y)
+        1) 读取宏观地理和 EdgeContract
+        2) 生成连续高程、地表和水体
+        3) 读取经过本格的 RouteSegment 并铺设外部道路
+        4) 若格内有聚落，调用 SettlementMapDecorator
+        5) 放置聚落内部道路、建筑、区域、证物和居民
+        6) 计算合法出入口和 player_spawn_points
+        7) 生成确定性的基础地图记录
+
+现有 LocalMapBuilder 中建筑、zone、证物、居民、废墟损坏逻辑迁入
+SettlementMapDecorator；不能继续让整个地图生成函数依赖 Settlement。
+
+6. 懒生成与持久状态
+------------------
+
+新增 LocalMapRepository，以 cell_key 索引已经生成的地图：
+
+- base_revision：生成算法版本。
+- generated_year：首次生成时间。
+- tiles/buildings/entities：世界基础状态。
+- route_revisions：已经应用的路线版本。
+- mutations：玩家或历史事件造成的持久改动。
+
+玩家专属的 explored_tiles、discovered_evidence、当前 NPC 运行位置继续放在 PlayerSession，
+不写进共享基础地图。否则一个玩家的探索会泄漏给同世界的其他会话。
+
+仓库只保存访问过的格子。未访问格可以随时由 seed、格坐标、世界地理和路线状态重建。
+
+7. 通商路线 TradeRoute
+----------------------
+
+新增持久领域实体：
+
+    TradeRoute {
+        id,
+        settlement_a_id,
+        settlement_b_id,
+        opened_year,
+        opened_event_id,
+        status: active | declining | abandoned | destroyed,
+        path: [(x, y), ...],
+        revision
+    }
+
+路线 ID 使用排序后的两个聚落 ID，保证双向关系只创建一条路线。trade_volume 从 0 跨到
+大于 0，或明确执行 trade_opened 效果时创建路线。首期贸易量后来降到 0 时不删除道路，
+只将状态改为 declining/abandoned，保留历史道路痕迹。
+
+8. 世界路线寻路
+--------------
+
+使用确定性 A* 在世界格上寻路。成本至少包含：
+
+- 平原、草原、河谷成本低。
+- 森林、灌木、高地成本中等。
+- 山地成本高，但允许通过合适山口。
+- 河流增加过河成本，但不能完全禁止；交叉点会成为桥或渡口。
+- 湖泊和海洋首期不可通行。
+- 已有道路降低成本，使后续路线倾向组成交通网络。
+- 政治敌对区域可加成本，但首期不作为硬阻挡。
+
+所有候选点排序必须包含稳定的坐标次序作为最终 tie-break，禁止依赖 set/dict 迭代顺序。
+
+世界 route path 再转换成每格 RouteSegment。共享边界的道路端口由 route_id 和边界键
+确定，格内道路使用地形成本寻路连接入口、出口和聚落中心。
+
+9. 动态道路注入
+--------------
+
+路线创建时可能出现两种格子：
+
+- 尚未生成：只记录 TradeRoute，未来生成时读取 RouteSegment。
+- 已经生成：LocalMapRepository.apply_route(route) 对受影响地图执行可重复的 patch。
+
+道路 patch 必须满足：
+
+- 以 route_id + revision 幂等，重复执行不重复修改。
+- 不覆盖建筑、证物容器或不可替换的玩家改动物。
+- 与河流相交时生成 TILE_BRIDGE 或渡口，而不是抹掉河流。
+- 找不到合法路径时记录明确错误，不能画穿建筑或制造不可达区域。
+- patch 后重新验证边缘端口连通性和关键建筑门的可达性。
+
+10. 跨格移动
+------------
+
+LocalTimeSimulation.move_player() 增加三态结果：
+
+- moved：在当前地图内移动成功。
+- blocked：地形、实体或越界方向不可进入。
+- exit_map：从合法边界端口尝试进入相邻格。
+
+PlayerSession 收到 exit_map 后：
+
+1) 计算相邻 cell；
+2) 验证世界范围和步行可达性；
+3) 保存当前格运行态；
+4) 从 LocalMapRepository 获取或生成目标地图；
+5) 从相反边缘的同一 offset 放置玩家；
+6) 恢复目标格的探索和运行态；
+7) 返回 location、local_map、runtime、world_map 更新。
+
+跨格不能使用普通 player_start；player_start 只用于新会话和快速旅行落点。
+
+11. 世界地图与快速旅行
+----------------------
+
+world_map payload 增加：
+
+- current_cell: {x, y}
+- current_settlement_id: Optional[str]
+- routes: 只包含玩家可见的 route path、status 和公开端点信息
+
+locations 仍只列出聚落和废墟用于显示，但前端只有 alive settlement 显示“前往”按钮。
+点击普通地形格只允许查看地貌信息，不发送 travel。废墟可以选择查看，但不能快速旅行。
+
+WorldMapView.tsx 删除“连接最近聚落”的装饰线，改画 routes。玩家在荒野时用格子高亮显示
+当前位置，不能再只依赖 current_location_id 标记。
+
+
+四、需要修改和新增的程序
+========================
+
+必须修改
+--------
+
+simulation/geography.py
+    保留水文流向，提供 river_connections、共享边界地理查询和连续局部采样接口。
+
+simulation/world.py
+    增加 trade_routes、格内聚落索引、路线创建入口、路线序列化和 schema 迁移。
+
+simulation/settlement.py
+    保持 RelationshipData 为贸易事实来源；必要时增加正式通商状态或路线 ID 引用。
+
+simulation/effects.py
+    在通商效果成功后创建路线，并让 EffectResolver 回滚时同时恢复路线状态；推荐新增
+    EstablishTradeRoute 效果，避免把有副作用的路线创建藏在 ModifyRelationship 中。
+
+simulation/event_rules.py
+    trade_opened 的效果列表加入 EstablishTradeRoute，明确道路创建的历史事件来源。
+
+game/local_map.py
+    拆分世界格基础生成和聚落装饰；改用格坐标、边界契约和真实 RouteSegment。
+
+game/local_time.py
+    识别合法地图出口，返回 exit_map；支持按指定边缘入口恢复玩家位置和格运行态。
+
+game/player_session.py
+    当前位置改为世界格；支持荒野 payload、边缘切图、地图仓库、聚落限定快速旅行和
+    玩家地图状态序列化。
+
+viewer/server.py
+    让 move 的跨图返回可以更新完整 location；增加玩家会话保存/读取入口或接入已有存档。
+
+player/src/types.ts
+    扩展 LocalMap.site_type、当前位置、地图出口、路线和跨格 move 返回类型。
+
+player/src/App.tsx
+    move 收到 location 时整体切换地图；荒野状态不再强制渲染 settlement 信息。
+
+player/src/WorldMapView.tsx
+    只允许现存聚落快速旅行；绘制真实路线；显示荒野当前位置。
+
+player/src/GameCanvas.tsx 与 player/src/LocalMiniMap.tsx
+    增加道路、桥、河流和边界出口的稳定表现；切图后正确重置画布缓存和相机。
+
+建议新增
+--------
+
+simulation/routes.py
+    TradeRoute、RoutePlanner、路线成本、序列化和路线状态管理。
+
+game/world_cell_map.py
+    CellCoord、EdgeContract、EdgePortal、WorldCellMapBuilder 和连续地貌生成。
+
+game/local_map_repository.py
+    懒生成缓存、地图记录、路线 patch、地图 mutation 和序列化。
+
+tests/test_routes.py
+    通商触发、A* 确定性、地形绕避、桥梁、路线状态和序列化测试。
+
+tests/test_world_cell_maps.py
+    四方向边界契约、河流/山脉/道路连续、生成顺序无关和 patch 幂等测试。
+
+tests/test_player_world_movement.py
+    跨格进入、返回、缓存复用、海洋阻挡、荒野 payload 和快速旅行权限测试。
+
+需要扩展的现有测试
+------------------
+
+tests/test_geography.py
+    增加流向和相邻格自然要素连续性不变量。
+
+tests/test_player_session.py
+    将“废墟可快速旅行”旧行为改为废墟只能步行进入，并覆盖荒野当前位置。
+
+tests/test_serialization.py
+    覆盖 TradeRoute、已生成地图仓库、地图 mutation 和 schema 12 到新 schema 的迁移。
+
+tests/test_determinism.py
+    比较不同格子访问顺序、不同路线创建顺序下的最终地图结果。
+
+tests/test_viewer.py
+    覆盖新的 move 跨图响应、world_map routes 和 travel 权限错误。
+
+
+五、存档与版本策略
+================
+
+1. World schema 从 12 升级；不要继续只接受完全相等的版本后直接报错。
+2. schema 12 读入时 trade_routes 默认为空，已有 RelationshipData.trade_volume > 0 的关系
+   可以按确定性规则补建“legacy”路线，opened_year 使用 last_interaction_year 或 0。
+3. 旧存档没有本地地图仓库，按 seed 懒生成即可，不需要保存 40000 个空记录。
+4. 本地地图记录必须有独立 generator_version。算法升级时可判断重建未修改地图，或迁移
+   已有 mutation，不能静默用新算法解释旧 tiles。
+5. PlayerSession 当前没有存档。首期至少实现 to_dict()/from_dict() 并由 server 提供持久化
+   接口，否则服务器重启后“再次读取”无法成立。
+6. Geography 仍可由 seed 重建，但流向算法版本必须受 world schema 或 geography_version
+   约束，防止算法升级后旧路线与新地貌错位。
+
+
+六、分阶段实施计划
+================
+
+阶段 1：世界格和连续自然地貌
+---------------------------
+
+1. 增加 CellCoord、固定 64 x 64 尺寸和 EdgeContract。
+2. Geography 暴露河流流向与连续采样。
+3. 实现无聚落的 WorldCellMapBuilder。
+4. 完成相邻格河流、海岸和山地边界测试。
+
+完成标准：任意顺序生成相邻格，四条共享边界的地貌数据完全匹配。
+
+阶段 2：聚落地图迁移
+------------------
+
+1. 将现有建筑、区域、证物、居民和废墟逻辑迁入聚落装饰器。
+2. 聚落地图采用统一世界格尺度。
+3. 保持现有调查、阅读、咨询、NPC 时间模拟测试通过。
+
+完成标准：现有聚落玩法没有功能回退，聚落外部地貌服从格边界契约。
+
+阶段 3：边缘移动和地图仓库
+------------------------
+
+1. 实现 exit_map 协议和 PlayerSession.current_cell。
+2. 加入 LocalMapRepository、每格运行态和玩家探索态。
+3. 改造后端 payload、App 和 GameCanvas 切图流程。
+
+完成标准：玩家可连续步行穿过多个陆地格，往返时地图及持久改动保持不变。
+
+阶段 4：贸易路线和本地道路
+------------------------
+
+1. 实现 TradeRoute 和确定性世界 A*。
+2. trade_opened 事件创建路线。
+3. RouteSegment 进入本地生成；已生成地图支持幂等道路 patch。
+4. 实现桥、渡口和山口的最低可用表现。
+
+完成标准：每一条 active TradeRoute 从聚落 A 到聚落 B 在世界路径和所有本地地图中连续。
+
+阶段 5：世界地图、快速旅行和存档
+--------------------------------
+
+1. 前端绘制真实道路，删除最近聚落装饰线。
+2. 仅现存聚落可快速旅行；废墟和荒野不可点击旅行。
+3. 保存 World 路线、LocalMapRepository 和 PlayerSession。
+4. 增加 schema 迁移和全量回归测试。
+
+完成标准：刷新或重启后读取存档，位置、已生成地图、道路和探索状态一致。
+
+
+七、关键不变量与验收测试
+========================
+
+1. 一个 cell_key 在同一世界中最多对应一份基础地图记录。
+2. 相邻格共享边界的同类端口 offset、width、feature_id 必须一致。
+3. A 格东边出口 offset == n 时，B 格西边入口必须为 n。
+4. 河流不能在非源头、非湖泊、非海洋位置无故终止。
+5. active TradeRoute 的 world path 必须是从 A 到 B 的连续四邻接格序列。
+6. route 经过的相邻本地地图必须共享同一道路端口。
+7. 道路与河流交叉后，两条要素都保持连通，交叉格为桥或渡口。
+8. 对同一路线 revision 重复 patch 地图，序列化结果必须不变。
+9. 不同访问顺序不能改变同一格的基础地形和端口。
+10. 未生成格不占用本地地图存储空间。
+11. 快速旅行 API 对废墟、荒野 ID、未知聚落和已毁聚落返回明确错误。
+12. 玩家在荒野时仍可移动、等待、查看地图，但聚落专属证物和知情人列表为空。
+13. 世界地图 payload 不泄漏 polity_id、历史真相或玩家尚不可知的路线信息。
+14. schema 12 存档迁移后保持聚落、关系、事件和证物不丢失。
+
+
+八、风险与处理
+==============
+
+最高风险：现有地图尺寸语义不兼容
+--------------------------------
+
+现有聚落地图一个场景采样多个世界格，新需求要求一格一图。不能只在旧地图边缘加切图，
+否则世界尺度会重复。必须先统一坐标尺度，再迁移聚落装饰。
+
+高风险：道路晚于本地地图生成
+----------------------------
+
+通商发生在历史模拟中，而玩家可能已经访问沿途格。采用版本化、幂等 route patch，并把
+建筑和玩家 mutation 作为硬约束；路径失败要显式报告，不允许破坏地图。
+
+高风险：共享世界状态与玩家状态混合
+--------------------------------
+
+当前 local_map 内含 discovered_evidence。重构时必须把世界基础地图、历史改动和玩家探索
+覆盖层分开，否则多会话会相互污染，也无法可靠存档。
+
+中风险：40000 格存储量
+---------------------
+
+固定使用懒生成，只存访问过或发生 mutation 的格。基础地形尽量由 seed 重建，存档优先
+保存 generator_version、路线 revision 和 mutation，而不是无条件保存完整 tiles。
+
+中风险：贸易道路定义
+--------------------
+
+本报告以现有 trade_opened 事件作为“开始通商”的权威触发点。普通文化交流、一次物品
+转移或仅有信任关系不自动修路。这样可避免道路网络被非贸易事件意外填满。
+
+
+九、最终建议
+============
+
+该功能应按五个阶段实施，不建议同时直接改前端和旧 LocalMapBuilder。正确的首个提交应是
+“世界格坐标 + EdgeContract + 连续自然地貌测试”，因为道路、边缘移动和聚落地图都依赖
+这一层稳定契约。
+
+预计主要新增 3 个模块，修改约 12 个现有程序，并新增或扩展至少 7 组测试。功能完成后，
+世界地图不再只是地点选择器，而会成为本地探索空间的真实索引；河流、山脉和贸易道路
+也会在世界尺度和玩家实际看到的本地尺度上表达同一个地理事实。

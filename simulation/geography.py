@@ -1,6 +1,7 @@
 """Deterministic terrain, climate, hydrology, biomes, and settlement sites."""
 
 import heapq
+import math
 import random
 import numpy as np
 
@@ -14,6 +15,10 @@ from config import (
     GRID_WIDTH, GRID_HEIGHT,
     NOISE_SCALE, NOISE_OCTAVES, NOISE_PERSISTENCE, NOISE_LACUNARITY,
     SEA_LEVEL, RIVER_FLOW_PERCENTILE, MIN_SETTLEMENT_DISTANCE,
+)
+from simulation.geographic_features import (
+    GeographicFeature,
+    generate_geographic_features,
 )
 
 
@@ -416,6 +421,9 @@ class Geography:
         self.flow_accumulation: np.ndarray = None
         self.biomes: np.ndarray = None
         self.suitability: np.ndarray = None
+        self.features: list[GeographicFeature] = []
+        self._features_by_cell: dict[
+            tuple[int, int], list[GeographicFeature]] = {}
 
     def generate(self):
         """执行完整地理生成管线。"""
@@ -430,6 +438,41 @@ class Geography:
         self.suitability = settlement_suitability(
             self.heightmap, self.rainfall, self.rivers,
             self.biomes, self.lakes)
+        self.features = generate_geographic_features(
+            self.seed, self.biomes, self.heightmap,
+            self.rainfall, self.temperature)
+        self._features_by_cell = {}
+        for feature in self.features:
+            for cell in feature.cells:
+                self._features_by_cell.setdefault(cell, []).append(feature)
+
+    def get_features_at(self, x: int, y: int) -> list[GeographicFeature]:
+        return list(self._features_by_cell.get((x, y), ()))
+
+    def nearest_features(
+            self, x: int, y: int, feature_types: set[str] | None = None,
+            max_distance: float | None = None, limit: int = 1,
+    ) -> list[GeographicFeature]:
+        candidates = [
+            feature for feature in self.features
+            if feature_types is None or feature.feature_type in feature_types
+        ]
+        ranked = []
+        for feature in candidates:
+            left, top, right, bottom = feature.bounds
+            bounds_distance = math.hypot(
+                max(left - x, 0, x - right),
+                max(top - y, 0, y - bottom),
+            )
+            if max_distance is not None and bounds_distance > max_distance:
+                continue
+            distance = min(
+                math.hypot(cell_x - x, cell_y - y)
+                for cell_x, cell_y in feature.cells)
+            if max_distance is None or distance <= max_distance:
+                ranked.append((distance, -feature.importance, feature.id, feature))
+        ranked.sort(key=lambda item: item[:3])
+        return [item[3] for item in ranked[:max(0, limit)]]
 
     def get_biome_name(self, x: int, y: int) -> str:
         """返回中文生物群系名。"""
