@@ -22,7 +22,8 @@ def test_geography_is_deterministic():
 
     for layer in (
             "heightmap", "temperature", "rainfall", "rivers", "lakes",
-            "flow_accumulation", "biomes", "suitability"):
+            "flow_accumulation", "downstream_x", "downstream_y", "biomes",
+            "suitability"):
         assert np.array_equal(getattr(first, layer), getattr(second, layer))
     assert [item.to_dict(include_cells=True) for item in first.features] == [
         item.to_dict(include_cells=True) for item in second.features]
@@ -111,6 +112,22 @@ def test_hydrology_produces_sparse_connected_high_flow_channels(geography):
         if np.count_nonzero(neighbors) > 1:
             connected += 1
     assert connected / len(river_cells) > 0.98
+
+
+def test_hydrology_exposes_real_diagonal_river_connections(geography):
+    diagonal = next(
+        ((x, y), (dx, dy))
+        for y in range(geography.height)
+        for x in range(geography.width)
+        if geography.rivers[y, x]
+        for dx, dy in geography.river_connections(x, y)
+        if abs(dx) == 1 and abs(dy) == 1
+    )
+    (x, y), (dx, dy) = diagonal
+
+    assert geography.rivers[y + dy, x + dx] \
+        or geography.lakes[y + dy, x + dx] \
+        or geography.heightmap[y + dy, x + dx] <= SEA_LEVEL
 
 
 def test_biomes_distinguish_water_and_land(geography):

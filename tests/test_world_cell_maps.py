@@ -1,16 +1,27 @@
 """World-cell maps, border travel, and persistent trade routes."""
 
 import json
+from collections import deque
 from itertools import combinations
 
 import pytest
 
-from game.local_map import TILE_BRIDGE, TILE_ROAD, TILE_WATER
+from game.local_map import (
+    BLOCKING_TILES,
+    TILE_BRIDGE,
+    TILE_GRASS,
+    TILE_ROAD,
+    TILE_WATER,
+    LocalMapBuilder,
+    SettlementMapProfile,
+    paint_watercourse,
+)
 from game.local_time import LocalTimeSimulation
 from game.player_session import PlayerActionError, PlayerSession
 from game.world_cell_map import (
     LocalMapRepository,
     WorldCellMapBuilder,
+    _carve_water,
     _obscure_text_character,
     _paint_road,
     decorate_travel_groups,
@@ -109,6 +120,8 @@ def test_route_wilderness_contains_signs_and_stable_camps():
     assert wilderness_cells
     maps = [WorldCellMapBuilder().build(world, *cell)
             for cell in wilderness_cells]
+    for local_map in maps:
+        decorate_travel_groups(local_map, world)
 
     signs = [
         item for local_map in maps for item in local_map["entities"]
@@ -132,6 +145,8 @@ def test_route_wilderness_contains_signs_and_stable_camps():
     assert camps
     repeated = [WorldCellMapBuilder().build(world, *cell)
                 for cell in wilderness_cells]
+    for local_map in repeated:
+        decorate_travel_groups(local_map, world)
     assert [item["entities"] for item in maps] == [
         item["entities"] for item in repeated]
 
@@ -679,6 +694,106 @@ def test_cardinal_river_cells_share_a_water_portal():
         second_edge = second["tiles"][:second["width"]]
     assert first_edge == second_edge
     assert TILE_WATER in first_edge
+
+
+def test_diagonal_river_connections_use_matching_map_corners():
+    world = World(seed=42)
+    world.generate(years=0)
+    geography = world.geography
+    (x, y), (dx, dy) = next(
+        ((x, y), (dx, dy))
+        for y in range(geography.height)
+        for x in range(geography.width)
+        if geography.rivers[y, x]
+        for dx, dy in geography.river_connections(x, y)
+        if abs(dx) == 1 and abs(dy) == 1
+        and geography.rivers[y + dy, x + dx]
+    )
+    builder = WorldCellMapBuilder()
+    width, height = 80, 56
+    first_tiles = [TILE_GRASS] * (width * height)
+    second_tiles = [TILE_GRASS] * (width * height)
+
+    builder._paint_river(first_tiles, geography, x, y, width, height)
+    builder._paint_river(
+        second_tiles, geography, x + dx, y + dy, width, height)
+
+    first_corner = (
+        width - 1 if dx > 0 else 0,
+        height - 1 if dy > 0 else 0,
+    )
+    second_corner = (
+        0 if dx > 0 else width - 1,
+        0 if dy > 0 else height - 1,
+    )
+    assert first_tiles[first_corner[1] * width + first_corner[0]] == TILE_WATER
+    assert second_tiles[
+        second_corner[1] * width + second_corner[0]] == TILE_WATER
+
+
+def test_watercourse_rasterizes_a_diagonal_instead_of_an_l_shape():
+    width = height = 21
+    tiles = [TILE_GRASS] * (width * height)
+
+    _carve_water(tiles, width, height, (0, 0), (20, 20))
+
+    assert tiles[10 * width + 10] == TILE_WATER
+    assert tiles[2 * width + 18] == TILE_GRASS
+    assert tiles[18 * width + 2] == TILE_GRASS
+
+
+def test_settlement_roads_build_walkable_bridges_across_diagonal_river():
+    width, height = 60, 42
+    profile = SettlementMapProfile(
+        width=width,
+        height=height,
+        layout_type="river",
+        water_axis="diagonal_down",
+        water_side="east",
+        hub=(width // 2, height // 2),
+        entrances=(),
+        base_tile=TILE_GRASS,
+        landscape_type="plains",
+        landscape_name="测试河谷",
+        feature_names=(),
+        watercourse=((9, 0), (50, 41)),
+    )
+    tiles = [TILE_GRASS] * (width * height)
+    paint_watercourse(tiles, width, height, profile.watercourse, radius=1)
+
+    roads = LocalMapBuilder()._roads(
+        tiles, profile, type("WorldStub", (), {"seed": 1})(),
+        type("SettlementStub", (), {"id": "diagonal-river"})())
+    bridge_positions = {
+        (index % width, index // width)
+        for index, tile in enumerate(tiles)
+        if tile == TILE_BRIDGE
+    }
+
+    assert len(bridge_positions) >= 6
+    assert bridge_positions <= roads
+    assert TILE_BRIDGE not in BLOCKING_TILES
+
+    start = next(iter(bridge_positions))
+    reached = {start}
+    frontier = deque([start])
+    while frontier:
+        x, y = frontier.popleft()
+        for dx, dy in ((0, -1), (-1, 0), (1, 0), (0, 1)):
+            neighbor = (x + dx, y + dy)
+            if neighbor in roads and neighbor not in reached:
+                reached.add(neighbor)
+                frontier.append(neighbor)
+    touched_edges = {
+        edge
+        for x, y in reached
+        for edge, touches in (
+            ("north", y == 3), ("south", y == height - 4),
+            ("west", x == 3), ("east", x == width - 4),
+        )
+        if touches
+    }
+    assert len(touched_edges) >= 2
 
 
 def test_wilderness_profile_uses_its_named_geographic_feature():

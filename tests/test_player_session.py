@@ -573,9 +573,12 @@ def test_map_sizes_and_geographic_layouts_are_data_driven():
         if local_map["profile"]["water_axis"] == "vertical":
             row_counts = Counter(y for _, y in bridges)
             assert max(row_counts.values()) >= 3
-        else:
+        elif local_map["profile"]["water_axis"] == "horizontal":
             column_counts = Counter(x for x, _ in bridges)
             assert max(column_counts.values()) >= 3
+        else:
+            assert len({x for x, _ in bridges}) >= 3
+            assert len({y for _, y in bridges}) >= 3
 
     settlement = settlements[0]
     dimensions = []

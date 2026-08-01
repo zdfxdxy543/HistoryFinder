@@ -511,12 +511,68 @@ class SettlementScene extends Phaser.Scene {
         }
         }
       } else if (entity.kind === "camp") {
-        shape.fillStyle(entity.subtype.includes("abandoned") ? 0x786e5e : 0xb8874d, 1);
-        shape.fillTriangle(0, -15, 14, 12, -14, 12);
-        shape.lineStyle(2, 0x463628, 1);
-        shape.strokeTriangle(0, -15, 14, 12, -14, 12);
-        shape.fillStyle(0xd76b39, entity.subtype.includes("abandoned") ? 0.2 : 0.9);
-        shape.fillCircle(16, 9, 4);
+        const component = entity.component_type ?? entity.subtype;
+        if (component.includes("tent")) {
+          const collapsed = component.includes("collapsed");
+          shape.fillStyle(collapsed ? 0x71695b : component.includes("large") ? 0xb8874d : 0x9f7650, 1);
+          shape.fillTriangle(0, collapsed ? -5 : -15, 14, 12, -14, 12);
+          shape.lineStyle(2, 0x463628, 1);
+          shape.strokeTriangle(0, collapsed ? -5 : -15, 14, 12, -14, 12);
+          shape.lineBetween(0, collapsed ? -5 : -15, 0, 12);
+          if (!collapsed) {
+            shape.lineStyle(1.5, 0xd8c69f, 0.9);
+            shape.lineBetween(-14, 12, -18, 15);
+            shape.lineBetween(14, 12, 18, 15);
+          }
+        } else if (component.includes("campfire")) {
+          const burning = component === "campfire_burning";
+          const embers = component === "campfire_embers";
+          shape.fillStyle(0x71685a, 1);
+          for (const [stoneX, stoneY] of [[-7, 0], [-4, -5], [2, -6], [7, -1], [5, 5], [-3, 6]]) {
+            shape.fillCircle(stoneX, stoneY, 3);
+          }
+          shape.lineStyle(3, 0x493426, 1);
+          shape.lineBetween(-6, 5, 6, -4);
+          shape.lineBetween(-6, -4, 6, 5);
+          shape.fillStyle(burning ? 0xe56532 : embers ? 0xa4422c : 0x343331, burning ? 0.95 : 0.65);
+          shape.fillCircle(0, 0, burning ? 5 : 3);
+          if (burning) {
+            shape.fillStyle(0xf4b447, 0.95);
+            shape.fillTriangle(-3, 2, 1, -10, 5, 2);
+          }
+        } else if (component === "camp_wagon") {
+          shape.fillStyle(0x8b6848, 1);
+          shape.fillRoundedRect(-14, -6, 25, 15, 2);
+          shape.fillStyle(0xd0bb83, 1);
+          shape.fillTriangle(-12, -6, 9, -6, -2, -17);
+          shape.fillStyle(0x363a35, 1);
+          shape.fillCircle(-8, 11, 4);
+          shape.fillCircle(7, 11, 4);
+        } else if (["camp_supplies", "camp_crate_broken"].includes(component)) {
+          shape.fillStyle(component.includes("broken") ? 0x72553d : 0x9a7048, 1);
+          shape.fillRect(-11, -8, 22, 17);
+          shape.lineStyle(2, 0x4b3728, 1);
+          shape.strokeRect(-11, -8, 22, 17);
+          shape.lineBetween(-10, -7, 10, 8);
+          if (component.includes("broken")) shape.lineBetween(-11, 3, 2, -8);
+        } else if (component === "camp_tether") {
+          shape.lineStyle(4, 0x654a32, 1);
+          shape.lineBetween(-8, -10, -8, 10);
+          shape.lineBetween(8, -10, 8, 10);
+          shape.lineStyle(2, 0xb89460, 1);
+          shape.lineBetween(-8, -5, 8, 1);
+        } else if (component === "camp_bedroll") {
+          shape.fillStyle(0x837158, 1);
+          shape.fillRoundedRect(-13, -6, 26, 12, 5);
+          shape.lineStyle(2, 0x4d4336, 1);
+          shape.lineBetween(-5, -6, -5, 6);
+        } else {
+          const ruts = component === "camp_ruts" || component === "camp_tracks";
+          shape.lineStyle(2, ruts ? 0x725d43 : 0x555049, 0.75);
+          shape.lineBetween(-13, -6, 13, ruts ? -2 : 6);
+          shape.lineBetween(-13, 3, 13, ruts ? 7 : -3);
+          if (!ruts) shape.strokeCircle(0, 0, 8);
+        }
       } else if (entity.kind === "caravan") {
         shape.fillStyle(0x8b6848, 1);
         shape.fillRoundedRect(-15, -7, 26, 17, 3);

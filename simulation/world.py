@@ -97,6 +97,7 @@ from simulation.historical_sites import (
     HistoricalSite,
     HistoricalSiteManager,
 )
+from simulation.camps import WildernessCamp, camp_id
 
 
 DISASTER_RECOVERY_FOCUS = {
@@ -152,7 +153,7 @@ THEORETICAL_TITLES = {
     "astronomy": ["行星周期表解", "影长与季节论", "星位观测法"],
 }
 
-WORLD_SCHEMA_VERSION = 18
+WORLD_SCHEMA_VERSION = 19
 
 @dataclass
 class World:
@@ -176,6 +177,8 @@ class World:
     trade_routes: dict[str, TradeRoute] = field(default_factory=dict)
     road_segments: dict[str, RoadSegment] = field(default_factory=dict)
     travel_groups: dict[str, TravelGroup] = field(default_factory=dict)
+    wilderness_camps: dict[str, WildernessCamp] = field(default_factory=dict)
+    travel_clock_minutes: int = 6 * 60 + 55
     signposts: dict[str, Signpost] = field(default_factory=dict)
     religions: dict[str, ReligionTradition] = field(default_factory=dict)
     historical_sites: dict[str, HistoricalSite] = field(default_factory=dict)
@@ -462,6 +465,7 @@ class World:
         if route.status != "active":
             raise ValueError(f"cannot create caravan for {route.status} route")
         key = caravan_id(route.id)
+        self._ensure_route_camp_remain(route)
         existing = self.travel_groups.get(key)
         if existing is not None:
             return existing
@@ -492,6 +496,28 @@ class World:
         )
         self.travel_groups[key] = group
         return group
+
+    def _ensure_route_camp_remain(self, route: TradeRoute) -> None:
+        if len(route.path) < 3:
+            return
+        index = 1 + stable_route_int(
+            str(self.seed), route.id, "rest-camp") % (len(route.path) - 2)
+        cell = route.path[index]
+        key = f"camp_rest_{route.id}_{cell[0]}_{cell[1]}"
+        if key in self.wilderness_camps:
+            return
+        self.wilderness_camps[key] = WildernessCamp(
+            id=key,
+            world_cell=cell,
+            camp_type="caravan",
+            state="weathered",
+            layout_seed=stable_route_int(
+                str(self.seed), route.id, "rest-camp-layout"),
+            established_minute=max(0, self.travel_clock_minutes - 8 * 24 * 60),
+            state_changed_minute=self.travel_clock_minutes,
+            last_occupied_minute=max(
+                0, self.travel_clock_minutes - 8 * 24 * 60),
+        )
 
     def _ensure_route_travelers(self, route: TradeRoute) -> list[TravelGroup]:
         if route.status != "active":
@@ -553,6 +579,7 @@ class World:
         for group_id in [
                 item.id for item in self.travel_groups.values()
                 if item.route_id == route_key]:
+            self._vacate_group_camps(group_id)
             self.travel_groups.pop(group_id, None)
         for segment_id in route.segment_ids:
             segment = self.road_segments.get(segment_id)
@@ -591,6 +618,7 @@ class World:
         for group_id in [
                 item.id for item in self.travel_groups.values()
                 if item.route_id == route.id]:
+            self._vacate_group_camps(group_id)
             self.travel_groups.pop(group_id, None)
         for segment_id in route.segment_ids:
             segment = self.road_segments.get(segment_id)
@@ -739,11 +767,85 @@ class World:
             signpost.weather_to(year, self.seed)
 
     def advance_travel_groups(self, minutes: int) -> None:
-        for group in sorted(
-                self.travel_groups.values(), key=lambda item: item.id):
-            route = self.trade_routes.get(group.route_id)
-            if route is not None:
-                group.advance(minutes, route)
+        if minutes <= 0:
+            return
+        for _ in range(minutes):
+            self.travel_clock_minutes += 1
+            minute_of_day = self.travel_clock_minutes % (24 * 60)
+            is_camping_time = minute_of_day >= 19 * 60 or minute_of_day < 6 * 60
+            for group in sorted(
+                    self.travel_groups.values(), key=lambda item: item.id):
+                route = self.trade_routes.get(group.route_id)
+                if route is None:
+                    continue
+                cell = group.current_cell(route)
+                should_camp = (
+                    group.group_type == "caravan"
+                    and route.status == "active"
+                    and self.get_settlement_at(*cell) is None
+                    and is_camping_time
+                )
+                if should_camp:
+                    self._occupy_group_camp(group, cell)
+                    group.status = "camped"
+                    continue
+                self._vacate_group_camps(group.id)
+                group.advance(1, route)
+            for camp in self.wilderness_camps.values():
+                camp.weather_to(self.travel_clock_minutes)
+
+    def _occupy_group_camp(
+            self, group: TravelGroup, cell: tuple[int, int]) -> WildernessCamp:
+        occupied = next((
+            camp for camp in self.wilderness_camps.values()
+            if camp.owner_group_id == group.id and camp.state == "occupied"
+        ), None)
+        if occupied is not None and occupied.world_cell != cell:
+            occupied.vacate(self.travel_clock_minutes)
+            occupied = None
+        if occupied is None:
+            reusable = sorted((
+                camp for camp in self.wilderness_camps.values()
+                if camp.world_cell == cell
+                and camp.camp_type == "caravan"
+                and camp.state not in {"occupied", "erased"}
+            ), key=lambda camp: (-camp.last_occupied_minute, camp.id))
+            occupied = reusable[0] if reusable else None
+        if occupied is None:
+            key = camp_id(group.id, self.travel_clock_minutes)
+            occupied = WildernessCamp(
+                id=key,
+                world_cell=cell,
+                camp_type="caravan",
+                state="occupied",
+                layout_seed=stable_route_int(
+                    str(self.seed), group.id, str(self.travel_clock_minutes)),
+                established_minute=self.travel_clock_minutes,
+                state_changed_minute=self.travel_clock_minutes,
+                last_occupied_minute=self.travel_clock_minutes,
+                owner_group_id=group.id,
+            )
+            self.wilderness_camps[key] = occupied
+        else:
+            occupied.occupy(self.travel_clock_minutes, group.id)
+        return occupied
+
+    def _vacate_group_camps(self, group_id: str) -> None:
+        for camp in self.wilderness_camps.values():
+            if camp.owner_group_id == group_id and camp.state == "occupied":
+                camp.vacate(self.travel_clock_minutes)
+
+    def get_camps_at(self, x: int, y: int) -> list[WildernessCamp]:
+        return sorted((
+            camp for camp in self.wilderness_camps.values()
+            if camp.world_cell == (x, y) and camp.state != "erased"
+        ), key=lambda camp: camp.id)
+
+    def camp_signature(self, x: int, y: int) -> tuple[tuple, ...]:
+        return tuple(
+            (camp.id, camp.revision, camp.state, camp.owner_group_id)
+            for camp in self.get_camps_at(x, y)
+        )
 
     def get_travel_groups_at(self, x: int, y: int) -> list[TravelGroup]:
         result = []
@@ -2760,6 +2862,9 @@ class World:
                 segment.to_dict() for segment in self.road_segments.values()],
             "travel_groups": [
                 group.to_dict() for group in self.travel_groups.values()],
+            "wilderness_camps": [
+                camp.to_dict() for camp in self.wilderness_camps.values()],
+            "travel_clock_minutes": self.travel_clock_minutes,
             "signposts": [
                 signpost.to_dict() for signpost in self.signposts.values()],
             "religions": [
@@ -2795,7 +2900,7 @@ class World:
         """Restore the current world schema and rebuild runtime managers."""
         source_schema = int(data.get("schema_version", 0))
         if source_schema not in {
-                12, 13, 14, 15, 16, 17, WORLD_SCHEMA_VERSION}:
+                12, 13, 14, 15, 16, 17, 18, WORLD_SCHEMA_VERSION}:
             raise ValueError(
                 f"unsupported world schema: {data.get('schema_version')!r}; "
                 f"expected {WORLD_SCHEMA_VERSION}")
@@ -2816,7 +2921,8 @@ class World:
         if source_schema == WORLD_SCHEMA_VERSION:
             for key in (
                     "historical_sites", "burials", "signposts",
-                    "road_segments"):
+                    "road_segments", "wilderness_camps",
+                    "travel_clock_minutes"):
                 if key not in data:
                     missing.append(key)
         if missing:
@@ -2870,6 +2976,12 @@ class World:
             group_data["id"]: TravelGroup.from_dict(group_data)
             for group_data in data.get("travel_groups", [])
         }
+        w.wilderness_camps = {
+            item["id"]: WildernessCamp.from_dict(item)
+            for item in data.get("wilderness_camps", [])
+        }
+        w.travel_clock_minutes = int(data.get(
+            "travel_clock_minutes", 6 * 60 + 55))
         w.signposts = {
             item["id"]: Signpost.from_dict(item)
             for item in data.get("signposts", [])
@@ -3202,6 +3314,12 @@ def _validate_serialized_versions(data: dict) -> None:
         if item.get("schema_version") != 1:
             raise ValueError(
                 f"unsupported road_segments schema for "
+                f"{item.get('id', '<unknown>')}: "
+                f"{item.get('schema_version')!r}; expected 1")
+    for item in data.get("wilderness_camps", []):
+        if item.get("schema_version") != 1:
+            raise ValueError(
+                f"unsupported wilderness_camps schema for "
                 f"{item.get('id', '<unknown>')}: "
                 f"{item.get('schema_version')!r}; expected 1")
 

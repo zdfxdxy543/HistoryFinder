@@ -6,6 +6,10 @@ import {
   ArrowUp,
   BookOpen,
   Boxes,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  CircleHelp,
   Clock3,
   Cloud,
   CloudFog,
@@ -37,6 +41,17 @@ import GameCanvas from "./GameCanvas";
 import LocalMiniMap from "./LocalMiniMap";
 import WorldMapView from "./WorldMapView";
 import type { ActionResult, Journal, MapEntity, PlayerState, RuntimeState } from "./types";
+import {
+  advanceTutorial,
+  applyTutorialEvent,
+  defaultTutorialProgress,
+  loadTutorialProgress,
+  retreatTutorial,
+  saveTutorialProgress,
+  TUTORIAL_CHAPTERS,
+  type TutorialEvent,
+  type TutorialProgress,
+} from "./tutorial";
 
 const TYPE_LABELS: Record<string, string> = {
   document: "文书",
@@ -110,7 +125,20 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [cheatDialogOpen, setCheatDialogOpen] = useState(false);
   const [cheatCode, setCheatCode] = useState("");
+  const [tutorialProgress, setTutorialProgress] = useState(loadTutorialProgress);
+  const [tutorialOpen, setTutorialOpen] = useState(
+    () => !loadTutorialProgress().completed,
+  );
   const started = useRef(false);
+
+  useEffect(() => {
+    saveTutorialProgress(tutorialProgress);
+  }, [tutorialProgress]);
+
+  const recordTutorialEvent = useCallback((event: TutorialEvent) => {
+    if (!tutorialOpen) return;
+    setTutorialProgress((current) => applyTutorialEvent(current, event));
+  }, [tutorialOpen]);
 
   const createWorld = useCallback(async () => {
     setLoading(true);
@@ -174,6 +202,9 @@ export default function App() {
         if (payload.action === "read") {
           setReadIds((current) => new Set(current).add(String(payload.evidence_id)));
         }
+        if (["examine", "read", "search_container", "consult", "talk", "inspect_wilderness"].includes(String(payload.action))) {
+          recordTutorialEvent("investigate");
+        }
         return result;
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "调查动作失败");
@@ -182,7 +213,7 @@ export default function App() {
         setBusy(false);
       }
     },
-    [sessionId],
+    [recordTutorialEvent, sessionId],
   );
 
   const movePlayer = useCallback(async (dx: number, dy: number) => {
@@ -209,12 +240,13 @@ export default function App() {
         setNearbyIds([]);
       }
       if (result.runtime) setRuntime(result.runtime);
+      recordTutorialEvent("move");
       return result.runtime ?? null;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "无法移动");
       return null;
     }
-  }, [sessionId]);
+  }, [recordTutorialEvent, sessionId]);
 
   const travelTo = useCallback(async (destinationId: string) => {
     if (!sessionId) return;
@@ -251,7 +283,8 @@ export default function App() {
     setSelected(entity);
     setDockTab(["informant", "resident"].includes(entity.kind) ? "people" : "inspect");
     if (entity.kind === "evidence") setActiveEvidenceId(entity.id);
-  }, []);
+    recordTutorialEvent("select_entity");
+  }, [recordTutorialEvent]);
 
   const onInteract = useCallback(
     (entity: MapEntity | null) => {
@@ -372,7 +405,10 @@ export default function App() {
         {state && (
           <div className="location-heading">
             <nav className="view-switch" aria-label="地图层级">
-              <button className={viewMode === "world" ? "active" : ""} onClick={() => setViewMode("world")}>
+              <button className={`${viewMode === "world" ? "active" : ""}${tutorialOpen && TUTORIAL_CHAPTERS[tutorialProgress.chapterIndex].steps[tutorialProgress.stepIndex].target === "world" ? " tutorial-focus" : ""}`} onClick={() => {
+                setViewMode("world");
+                recordTutorialEvent("open_world");
+              }}>
                 <Globe2 size={14} /> 世界
               </button>
               <button className={viewMode === "local" ? "active" : ""} onClick={() => setViewMode("local")}>
@@ -426,6 +462,18 @@ export default function App() {
           <button className="icon-command" title="作弊码控制台" onClick={() => setCheatDialogOpen(true)} disabled={loading || busy}>
             <Terminal size={18} />
           </button>
+          <button
+            className={`icon-command${tutorialOpen ? " selected" : ""}`}
+            title="新手教程"
+            aria-pressed={tutorialOpen}
+            onClick={() => {
+              if (tutorialProgress.completed) setTutorialProgress(defaultTutorialProgress());
+              setTutorialOpen((current) => !current || tutorialProgress.completed);
+            }}
+            disabled={loading}
+          >
+            <CircleHelp size={18} />
+          </button>
           {state?.cheats.full_map_vision.unlocked && (
             <button
               className={`icon-command cheat-quick-toggle${state.cheats.full_map_vision.enabled ? " selected" : ""}`}
@@ -444,7 +492,7 @@ export default function App() {
         <WorldMapView map={state.world_map} busy={busy} onTravel={(id) => void travelTo(id)} />
       ) : (
       <main className="workspace">
-        <section className="scene-pane" aria-label="当前聚落">
+        <section className={`scene-pane${tutorialOpen && TUTORIAL_CHAPTERS[tutorialProgress.chapterIndex].steps[tutorialProgress.stepIndex].target === "scene" ? " tutorial-focus" : ""}`} aria-label="当前聚落">
           {state && runtime && (
             <>
               <GameCanvas
@@ -486,7 +534,7 @@ export default function App() {
           </div>
         </section>
 
-        <aside className="investigation-dock">
+        <aside className={`investigation-dock${tutorialOpen && TUTORIAL_CHAPTERS[tutorialProgress.chapterIndex].steps[tutorialProgress.stepIndex].target === "investigation" ? " tutorial-focus" : ""}`}>
           <nav className="dock-tabs" aria-label="调查面板">
             <button className={dockTab === "inspect" ? "active" : ""} onClick={() => setDockTab("inspect")}>
               <Search size={16} /> 调查
@@ -494,7 +542,10 @@ export default function App() {
             <button className={dockTab === "people" ? "active" : ""} onClick={() => setDockTab("people")}>
               <Users size={16} /> 人物
             </button>
-            <button className={dockTab === "journal" ? "active" : ""} onClick={() => setDockTab("journal")}>
+            <button className={`${dockTab === "journal" ? "active" : ""}${tutorialOpen && TUTORIAL_CHAPTERS[tutorialProgress.chapterIndex].steps[tutorialProgress.stepIndex].target === "journal" ? " tutorial-focus" : ""}`} onClick={() => {
+              setDockTab("journal");
+              recordTutorialEvent("open_journal");
+            }}>
               <BookOpen size={16} /> 游记
               <span className="count-badge">{journal?.counts.claims ?? 0}</span>
             </button>
@@ -595,6 +646,23 @@ export default function App() {
         </div>
       )}
 
+      {tutorialOpen && state && (
+        <TutorialPanel
+          progress={tutorialProgress}
+          onBack={() => setTutorialProgress((current) => retreatTutorial(current))}
+          onNext={() => {
+            const next = advanceTutorial(tutorialProgress);
+            setTutorialProgress(next);
+            if (next.completed) setTutorialOpen(false);
+          }}
+          onClose={() => setTutorialOpen(false)}
+          onSkip={() => {
+            setTutorialProgress((current) => ({ ...current, completed: true }));
+            setTutorialOpen(false);
+          }}
+        />
+      )}
+
       {notice && (
         <div className="notice" role="alert">
           <Info size={16} />
@@ -609,6 +677,59 @@ export default function App() {
         </div>
       )}
     </div>
+  );
+}
+
+function TutorialPanel({
+  progress,
+  onBack,
+  onNext,
+  onClose,
+  onSkip,
+}: {
+  progress: TutorialProgress;
+  onBack: () => void;
+  onNext: () => void;
+  onClose: () => void;
+  onSkip: () => void;
+}) {
+  const chapter = TUTORIAL_CHAPTERS[progress.chapterIndex];
+  const step = chapter.steps[progress.stepIndex];
+  const isFirst = progress.chapterIndex === 0 && progress.stepIndex === 0;
+  const isLast = progress.chapterIndex === TUTORIAL_CHAPTERS.length - 1
+    && progress.stepIndex === chapter.steps.length - 1;
+  const completedSteps = TUTORIAL_CHAPTERS
+    .slice(0, progress.chapterIndex)
+    .reduce((total, item) => total + item.steps.length, 0) + progress.stepIndex;
+  const totalSteps = TUTORIAL_CHAPTERS.reduce(
+    (total, item) => total + item.steps.length,
+    0,
+  );
+
+  return (
+    <section className="tutorial-panel" aria-live="polite" aria-label="新手教程">
+      <header>
+        <div>
+          <small>{chapter.title} · {completedSteps + 1}/{totalSteps}</small>
+          <h2>{step.title}</h2>
+        </div>
+        <button className="icon-command quiet" title="暂时收起教程" onClick={onClose}><X size={16} /></button>
+      </header>
+      <div className="tutorial-progress" aria-hidden="true">
+        <span style={{ width: `${((completedSteps + 1) / totalSteps) * 100}%` }} />
+      </div>
+      <p>{step.body}</p>
+      {step.completionEvent && <small className="tutorial-condition">完成当前操作后自动继续</small>}
+      <footer>
+        <button className="tutorial-skip" onClick={onSkip}>跳过教程</button>
+        <div>
+          <button className="icon-command" title="上一步" onClick={onBack} disabled={isFirst}><ChevronLeft size={16} /></button>
+          <button className="command-button primary" onClick={onNext}>
+            {step.completionEvent ? "跳过此步" : isLast ? <><Check size={15} /> 完成</> : <>继续 <ChevronRight size={15} /></>}
+          </button>
+        </div>
+      </footer>
+    </section>
   );
 }
 

@@ -584,11 +584,13 @@ class PlayerSession:
         before = {
             item.id for item in self.world.get_travel_groups_at(
                 *self.current_cell)}
+        before_camps = self.world.camp_signature(*self.current_cell)
         self.world.advance_travel_groups(minutes)
         after = {
             item.id for item in self.world.get_travel_groups_at(
                 *self.current_cell)}
-        if before == after:
+        after_camps = self.world.camp_signature(*self.current_cell)
+        if before == after and before_camps == after_camps:
             return False
         previous = self.local_time
         decorate_travel_groups(self.local_map, self.world)

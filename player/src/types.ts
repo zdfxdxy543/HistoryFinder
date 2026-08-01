@@ -31,6 +31,10 @@ export type MapEntity = {
   religion_name?: string;
   guard_count?: number;
   historical_site_id?: string;
+  camp_id?: string;
+  camp_state?: "occupied" | "embers" | "abandoned" | "weathered";
+  owner_group_id?: string;
+  component_type?: string;
   site_state?: "active" | "damaged" | "abandoned" | "ruined" | "restored";
   source_event_ids?: string[];
   wear_level?: "light" | "moderate" | "heavy";
@@ -78,6 +82,7 @@ export type LocalMap = {
     landscape_type: string;
     landscape_name: string;
     feature_names: string[];
+    watercourse?: Array<{ x: number; y: number }>;
   };
   tiles: number[];
   blocking_tiles: number[];

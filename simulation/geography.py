@@ -145,8 +145,9 @@ def generate_rainfall(hmap: np.ndarray, temp: np.ndarray, seed: int) -> np.ndarr
     return rainfall
 
 
-def generate_hydrology(hmap: np.ndarray, rainfall: np.ndarray,
-                       seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _generate_hydrology_with_routing(
+        hmap: np.ndarray, rainfall: np.ndarray, seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build drainage-connected rivers and lakes with priority-flood routing."""
     del seed  # Routing is already deterministic from terrain and rainfall.
     h, w = hmap.shape
@@ -212,8 +213,21 @@ def generate_hydrology(hmap: np.ndarray, rainfall: np.ndarray,
     threshold = max(18.0, float(threshold))
     rivers = land & ~lakes & (accumulation >= threshold)
 
-    return (rivers.astype(np.float32), lakes.astype(np.float32),
-            accumulation.astype(np.float32))
+    return (
+        rivers.astype(np.float32),
+        lakes.astype(np.float32),
+        accumulation.astype(np.float32),
+        downstream_x,
+        downstream_y,
+    )
+
+
+def generate_hydrology(hmap: np.ndarray, rainfall: np.ndarray,
+                       seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build public hydrology layers while keeping routing an implementation detail."""
+    rivers, lakes, accumulation, _, _ = _generate_hydrology_with_routing(
+        hmap, rainfall, seed)
+    return rivers, lakes, accumulation
 
 
 def generate_rivers(hmap: np.ndarray, rainfall: np.ndarray,
@@ -419,6 +433,8 @@ class Geography:
         self.rivers: np.ndarray = None
         self.lakes: np.ndarray = None
         self.flow_accumulation: np.ndarray = None
+        self.downstream_x: np.ndarray = None
+        self.downstream_y: np.ndarray = None
         self.biomes: np.ndarray = None
         self.suitability: np.ndarray = None
         self.features: list[GeographicFeature] = []
@@ -430,7 +446,13 @@ class Geography:
         self.heightmap = generate_heightmap(self.width, self.height, self.seed)
         self.temperature = generate_temperature(self.heightmap, self.seed)
         self.rainfall = generate_rainfall(self.heightmap, self.temperature, self.seed)
-        self.rivers, self.lakes, self.flow_accumulation = generate_hydrology(
+        (
+            self.rivers,
+            self.lakes,
+            self.flow_accumulation,
+            self.downstream_x,
+            self.downstream_y,
+        ) = _generate_hydrology_with_routing(
             self.heightmap, self.rainfall, self.seed)
         self.biomes = classify_biomes(
             self.heightmap, self.temperature, self.rainfall,
@@ -448,6 +470,42 @@ class Geography:
 
     def get_features_at(self, x: int, y: int) -> list[GeographicFeature]:
         return list(self._features_by_cell.get((x, y), ()))
+
+    def river_connections(self, x: int, y: int) -> tuple[tuple[int, int], ...]:
+        """Return actual upstream/downstream directions for one river cell."""
+        if not (0 <= x < self.width and 0 <= y < self.height):
+            return ()
+        if not bool(self.rivers[y, x]):
+            return ()
+
+        connections: set[tuple[int, int]] = set()
+        target_x = int(self.downstream_x[y, x])
+        target_y = int(self.downstream_y[y, x])
+        if self._is_water_cell(target_x, target_y):
+            connections.add((target_x - x, target_y - y))
+
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = x + dx, y + dy
+                if not (0 <= nx < self.width and 0 <= ny < self.height):
+                    continue
+                if not bool(self.rivers[ny, nx]):
+                    continue
+                if (int(self.downstream_x[ny, nx]) == x
+                        and int(self.downstream_y[ny, nx]) == y):
+                    connections.add((dx, dy))
+        return tuple(sorted(connections, key=lambda item: (item[1], item[0])))
+
+    def _is_water_cell(self, x: int, y: int) -> bool:
+        if not (0 <= x < self.width and 0 <= y < self.height):
+            return False
+        return bool(
+            self.rivers[y, x]
+            or self.lakes[y, x]
+            or self.heightmap[y, x] <= SEA_LEVEL
+        )
 
     def nearest_features(
             self, x: int, y: int, feature_types: set[str] | None = None,

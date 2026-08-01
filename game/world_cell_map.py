@@ -26,6 +26,7 @@ from game.local_map import (
     TILE_WATER,
     TILE_WALL,
     build_evidence_targets,
+    paint_watercourse,
 )
 
 
@@ -876,47 +877,6 @@ class WorldCellMapBuilder:
                 },
             ))
 
-        camp_roll = _stable_int(str(world.seed), str(x), str(y), "camp")
-        should_camp = bool(routes) and camp_roll % 5 == 0
-        remote_camp = not routes and camp_roll % 37 == 0
-        if should_camp or remote_camp:
-            anchor = (
-                road_candidates[min(3, len(road_candidates) - 1)]
-                if road_candidates else (width // 2, height // 2)
-            )
-            position = self._open_near(
-                tiles, width, height, anchor, occupied, minimum_distance=3)
-            occupied.add(position)
-            abandoned = camp_roll % 3 == 0
-            if remote_camp:
-                name = "猎人营地"
-                subtype = "hunter_camp"
-                description = (
-                    "简陋的遮雨棚旁堆着劈开的木柴，地上留有处理猎物的痕迹。")
-            elif abandoned:
-                name = "废弃商旅营地"
-                subtype = "abandoned_caravan_camp"
-                description = (
-                    "冷透的火塘、折断的车辐和被清空的货箱说明商队不久前在此停留。")
-            else:
-                name = "商旅宿营地"
-                subtype = "caravan_camp"
-                description = (
-                    "道路旁清理出一片宿营地，石块围成火塘，拴绳和车辙仍很新。")
-            entities.append(_wilderness_entity(
-                entity_id=f"camp_{x}_{y}",
-                kind="camp",
-                subtype=subtype,
-                position=position,
-                name=name,
-                role="temporary_site",
-                role_name="临时营地",
-                zone="道路旁" if routes else "偏远荒野",
-                description=description,
-                dialogue=("火塘边的人提醒你，入夜前最好不要独自离开道路。"
-                          if not abandoned else ""),
-            ))
-
         biome = str(world.geography.biomes[y, x])
         nearby_settlements = sorted(
             (settlement for settlement in world.settlements.values()
@@ -1185,26 +1145,30 @@ class WorldCellMapBuilder:
             return
         center = (width // 2, height // 2)
         portals = []
-        for nx, ny, edge in (
-                (x, y - 1, "north"), (x, y + 1, "south"),
-                (x - 1, y, "west"), (x + 1, y, "east")):
-            if not (0 <= nx < geography.width and 0 <= ny < geography.height):
-                continue
-            if str(geography.biomes[ny, nx]) not in {"river", "lake", "ocean"}:
-                continue
+        for dx, dy in geography.river_connections(x, y):
+            nx, ny = x + dx, y + dy
             offset = _edge_fraction("river", (x, y), (nx, ny))
-            if edge == "north":
+            if dx == 0 and dy < 0:
                 portals.append((round(offset * (width - 1)), 0))
-            elif edge == "south":
+            elif dx == 0 and dy > 0:
                 portals.append((round(offset * (width - 1)), height - 1))
-            elif edge == "west":
+            elif dx < 0 and dy == 0:
                 portals.append((0, round(offset * (height - 1))))
-            else:
+            elif dx > 0 and dy == 0:
                 portals.append((width - 1, round(offset * (height - 1))))
+            elif dx < 0 and dy < 0:
+                portals.append((0, 0))
+            elif dx > 0 and dy < 0:
+                portals.append((width - 1, 0))
+            elif dx < 0 and dy > 0:
+                portals.append((0, height - 1))
+            else:
+                portals.append((width - 1, height - 1))
         if not portals:
             portals = [(width // 2, 0), (width // 2, height - 1)]
-        for portal in portals:
-            _carve_water(tiles, width, height, portal, center)
+        for portal in dict.fromkeys(portals):
+            paint_watercourse(
+                tiles, width, height, (portal, center), radius=1)
 
     @staticmethod
     def _nearest_walkable(tiles, width, height, start):
@@ -1251,9 +1215,10 @@ class LocalMapRepository:
 
 
 def decorate_travel_groups(local_map: dict, world) -> None:
-    """Project persistent road parties without rebuilding static terrain."""
+    """Project persistent camps and road parties over static terrain."""
     local_map["entities"] = [
         item for item in local_map["entities"] if not item.get("dynamic")]
+    _decorate_wilderness_camps(local_map, world)
     cell = local_map.get("cell", {})
     x, y = int(cell.get("x", -1)), int(cell.get("y", -1))
     groups = world.get_travel_groups_at(x, y)
@@ -1397,6 +1362,162 @@ def decorate_travel_groups(local_map: dict, world) -> None:
             ))
 
 
+def _decorate_wilderness_camps(local_map: dict, world) -> None:
+    if local_map.get("site_type") != "wilderness":
+        return
+    cell = local_map.get("cell", {})
+    x, y = int(cell.get("x", -1)), int(cell.get("y", -1))
+    camps = world.get_camps_at(x, y)
+    if not camps:
+        return
+    width, height = local_map["width"], local_map["height"]
+    tiles = local_map["tiles"]
+    roads = {
+        (index % width, index // width)
+        for index, tile in enumerate(tiles)
+        if tile in {TILE_ROAD, TILE_BRIDGE}
+    }
+    occupied = {
+        (item["x"], item["y"])
+        for item in local_map["entities"]
+        if item.get("blocks_movement", True)
+    }
+    for camp in camps:
+        specs = _camp_component_specs(camp.state)
+        center = _camp_center(
+            tiles, width, height, roads, occupied,
+            tuple((dx, dy) for _, dx, dy, _ in specs), camp.layout_seed)
+        if center is None:
+            continue
+        zone = {
+            "occupied": "正在使用的商旅营地",
+            "embers": "刚撤离的宿营地",
+            "abandoned": "废弃宿营地",
+            "weathered": "风化营地遗迹",
+        }.get(camp.state, "荒野营地")
+        for component, dx, dy, blocks in specs:
+            position = center[0] + dx, center[1] + dy
+            if blocks:
+                occupied.add(position)
+            name, role_name, material, description = _camp_component_text(
+                component, camp.state)
+            local_map["entities"].append(_wilderness_entity(
+                entity_id=f"{camp.id}:{component}",
+                kind="camp",
+                subtype=component,
+                position=position,
+                name=name,
+                role="camp_component",
+                role_name=role_name,
+                zone=zone,
+                description=description,
+                dynamic=True,
+                extra={
+                    "state": camp.state,
+                    "material": material,
+                    "blocks_movement": blocks,
+                    "camp_id": camp.id,
+                    "camp_state": camp.state,
+                    "owner_group_id": camp.owner_group_id,
+                    "component_type": component,
+                },
+            ))
+
+
+def _camp_component_specs(state: str) -> tuple[tuple[str, int, int, bool], ...]:
+    if state == "occupied":
+        return (
+            ("camp_tent_large", -2, -1, True),
+            ("camp_tent_small", 2, -1, True),
+            ("campfire_burning", 0, 1, False),
+            ("camp_wagon", 3, 1, True),
+            ("camp_supplies", -3, 1, True),
+            ("camp_tether", 2, 3, False),
+            ("camp_bedroll", -1, 3, False),
+        )
+    if state == "embers":
+        return (
+            ("campfire_embers", 0, 0, False),
+            ("camp_bedroll", -2, 1, False),
+            ("camp_tracks", 2, 1, False),
+            ("camp_supplies", -3, -1, True),
+        )
+    if state == "abandoned":
+        return (
+            ("camp_tent_collapsed", -2, -1, True),
+            ("campfire_cold", 1, 0, False),
+            ("camp_crate_broken", 3, 1, True),
+            ("camp_tracks", -1, 2, False),
+        )
+    return (
+        ("campfire_ring", 0, 0, False),
+        ("camp_ruts", 2, 1, False),
+    )
+
+
+def _camp_center(tiles: list[int], width: int, height: int,
+                 roads: set[tuple[int, int]],
+                 occupied: set[tuple[int, int]],
+                 offsets: tuple[tuple[int, int], ...],
+                 seed: int) -> tuple[int, int] | None:
+    candidates = []
+    for y in range(4, height - 4):
+        for x in range(4, width - 4):
+            footprint = {(x + dx, y + dy) for dx, dy in offsets}
+            if footprint & occupied or footprint & roads:
+                continue
+            if any(tiles[py * width + px] in BLOCKING_TILES
+                   for px, py in footprint):
+                continue
+            road_distance = min((
+                abs(x - road_x) + abs(y - road_y)
+                for road_x, road_y in roads
+            ), default=4)
+            if roads and not 2 <= road_distance <= 8:
+                continue
+            rank = _stable_int(str(seed), str(x), str(y))
+            candidates.append((abs(road_distance - 4), rank, x, y))
+    if not candidates:
+        return None
+    _, _, x, y = min(candidates)
+    return x, y
+
+
+def _camp_component_text(component: str, state: str) -> tuple[str, str, str, str]:
+    data = {
+        "camp_tent_large": (
+            "商队大帐", "帐篷", "cloth", "厚帆布帐篷用木杆撑起，门帘旁挂着尚未收起的行囊。"),
+        "camp_tent_small": (
+            "护卫小帐", "帐篷", "cloth", "较小的帐篷靠近货车，地钉和拉绳都刚刚固定。"),
+        "camp_tent_collapsed": (
+            "塌陷帐篷", "废弃帐篷", "cloth", "破损篷布伏在折断的支杆上，边缘已经沾满泥土。"),
+        "campfire_burning": (
+            "燃烧的火塘", "火塘", "wood", "石圈中央燃着篝火，锅架和新添的木柴说明营地仍有人使用。"),
+        "campfire_embers": (
+            "尚热的余烬", "余烬", "ash", "火焰已经熄灭，灰层下仍透出暗红余光。"),
+        "campfire_cold": (
+            "冷火塘", "火塘遗迹", "ash", "雨水浸过发黑的木炭，石圈里已经感觉不到热度。"),
+        "campfire_ring": (
+            "风化火塘石圈", "营地遗迹", "stone", "半埋进土里的石圈和少量炭屑标记着旧宿营地的位置。"),
+        "camp_wagon": (
+            "停放的货车", "货车", "wood", "卸下部分货物的篷车停在帐篷旁，车轮已经用木楔固定。"),
+        "camp_supplies": (
+            "宿营物资", "物资堆", "wood", "木箱、饮水桶和捆扎好的草料整齐堆在防雨布下。"),
+        "camp_crate_broken": (
+            "破裂木箱", "遗留物资", "wood", "空木箱的一侧已经裂开，只剩断绳和潮湿填料。"),
+        "camp_tether": (
+            "拴畜绳桩", "拴马处", "wood", "数根短桩之间系着长绳，周围泥地布满牲畜蹄印。"),
+        "camp_bedroll": (
+            "铺盖与草垫", "铺盖", "cloth", "卷起一半的铺盖压在干草垫上，旁边留着水囊。"),
+        "camp_tracks": (
+            "密集脚印", "活动痕迹", "earth", "交叠的脚印和蹄印从营地延伸到道路，边缘仍很清楚。"),
+        "camp_ruts": (
+            "浅淡车辙", "风化痕迹", "earth", "两道几乎被野草覆盖的浅沟，是货车长期碾压留下的痕迹。"),
+    }
+    return data.get(component, (
+        "营地遗物", "营地组成", "wood", f"这件遗物属于一处{state}状态的荒野营地。"))
+
+
 def _road_path_between(roads: set[tuple[int, int]],
                        start: tuple[int, int],
                        end: tuple[int, int]) -> list[tuple[int, int]]:
@@ -1536,15 +1657,7 @@ def _paint_road(tiles, width, height, x, y, roads,
 
 
 def _carve_water(tiles, width, height, start, end):
-    x, y = start
-    while (x, y) != end:
-        for px in range(max(0, x - 1), min(width, x + 2)):
-            for py in range(max(0, y - 1), min(height, y + 2)):
-                tiles[py * width + px] = TILE_WATER
-        if x != end[0]:
-            x += 1 if end[0] > x else -1
-        elif y != end[1]:
-            y += 1 if end[1] > y else -1
+    paint_watercourse(tiles, width, height, (start, end), radius=1)
 
 
 def _stable_int(*parts: str) -> int:

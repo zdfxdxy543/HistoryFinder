@@ -38,6 +38,82 @@ BLOCKING_TILES = {
 }
 
 
+def _raster_line(start: tuple[int, int], end: tuple[int, int]):
+    """Yield an endpoint-inclusive diagonal-capable raster line."""
+    x, y = start
+    target_x, target_y = end
+    dx = abs(target_x - x)
+    dy = abs(target_y - y)
+    step_x = 1 if x < target_x else -1
+    step_y = 1 if y < target_y else -1
+    error = dx - dy
+    while True:
+        yield x, y
+        if (x, y) == (target_x, target_y):
+            return
+        doubled = error * 2
+        if doubled > -dy:
+            error -= dy
+            x += step_x
+        if doubled < dx:
+            error += dx
+            y += step_y
+
+
+def paint_watercourse(tiles: list[int], width: int, height: int,
+                      points: tuple[tuple[int, int], ...],
+                      radius: int = 1) -> None:
+    """Paint a thick, connected watercourse through each control point."""
+    if not points:
+        return
+    segments = zip(points, points[1:]) if len(points) > 1 else (
+        (points[0], points[0]),)
+    for start, end in segments:
+        for x, y in _raster_line(start, end):
+            for py in range(max(0, y - radius), min(height, y + radius + 1)):
+                for px in range(max(0, x - radius), min(width, x + radius + 1)):
+                    tiles[py * width + px] = TILE_WATER
+
+
+def line_box_endpoints(center: tuple[float, float],
+                       direction: tuple[float, float],
+                       width: int, height: int,
+                       inset: int = 0) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Clip an infinite line to a rectangular tile map."""
+    cx, cy = center
+    dx, dy = direction
+    left, top = float(inset), float(inset)
+    right = float(max(inset, width - 1 - inset))
+    bottom = float(max(inset, height - 1 - inset))
+    intersections: list[tuple[float, float, float]] = []
+    if abs(dx) > 1e-9:
+        for x in (left, right):
+            t = (x - cx) / dx
+            y = cy + t * dy
+            if top - 1e-9 <= y <= bottom + 1e-9:
+                intersections.append((t, x, y))
+    if abs(dy) > 1e-9:
+        for y in (top, bottom):
+            t = (y - cy) / dy
+            x = cx + t * dx
+            if left - 1e-9 <= x <= right + 1e-9:
+                intersections.append((t, x, y))
+    if len(intersections) < 2:
+        point = (
+            max(inset, min(width - 1 - inset, round(cx))),
+            max(inset, min(height - 1 - inset, round(cy))),
+        )
+        return point, point
+    intersections.sort(key=lambda item: item[0])
+    endpoints = []
+    for _, x, y in (intersections[0], intersections[-1]):
+        endpoints.append((
+            max(inset, min(width - 1 - inset, round(x))),
+            max(inset, min(height - 1 - inset, round(y))),
+        ))
+    return endpoints[0], endpoints[1]
+
+
 SITE_ZONE = {
     "library_collection": "library",
     "administrative_archive": "archive",
@@ -267,6 +343,7 @@ class SettlementMapProfile:
     landscape_type: str
     landscape_name: str
     feature_names: tuple[str, ...]
+    watercourse: tuple[tuple[int, int], ...]
 
     def to_dict(self) -> dict:
         return {
@@ -279,6 +356,8 @@ class SettlementMapProfile:
             "landscape_type": self.landscape_type,
             "landscape_name": self.landscape_name,
             "feature_names": list(self.feature_names),
+            "watercourse": [
+                {"x": x, "y": y} for x, y in self.watercourse],
         }
 
 
@@ -664,10 +743,19 @@ class LocalMapBuilder:
         else:
             water_side = "south" if nearest[1] > 0 else "north"
         nearest_distance = abs(nearest[0]) + abs(nearest[1])
+        watercourse: tuple[tuple[int, int], ...] = ()
         if nearest[2] == "river" and nearest_distance <= 1:
-            x_span = max(item[0] for item in river) - min(item[0] for item in river)
-            y_span = max(item[1] for item in river) - min(item[1] for item in river)
-            water_axis = "horizontal" if x_span >= y_span else "vertical"
+            river_x, river_y = sx + nearest[0], sy + nearest[1]
+            river_vector = self._river_vector(
+                geography.river_connections(river_x, river_y), river)
+            if river_vector[1] == 0:
+                water_axis = "horizontal"
+            elif river_vector[0] == 0:
+                water_axis = "vertical"
+            elif river_vector[0] * river_vector[1] > 0:
+                water_axis = "diagonal_down"
+            else:
+                water_axis = "diagonal_up"
             layout = "river"
         elif nearest[2] in {"ocean", "lake"} and nearest_distance <= 2:
             water_axis = "vertical" if water_side in {"east", "west"} else "horizontal"
@@ -699,6 +787,19 @@ class LocalMapBuilder:
                 if water_side == "north" else 0
             hub_x += shift_x
             hub_y += shift_y
+        elif layout == "river":
+            anchor_x = width / 2
+            anchor_y = height / 2
+            if water_side == "east":
+                anchor_x = width * 2 / 3
+            elif water_side == "west":
+                anchor_x = width / 3
+            elif water_side == "south":
+                anchor_y = height * 2 / 3
+            elif water_side == "north":
+                anchor_y = height / 3
+            watercourse = line_box_endpoints(
+                (anchor_x, anchor_y), river_vector, width, height)
         entrances = self._entrance_directions(world, settlement)
         base_tile = TILE_SAND if landscape in {
             "desert", "scrubland"} else (
@@ -721,7 +822,38 @@ class LocalMapBuilder:
         return SettlementMapProfile(
             width, height, layout, water_axis, water_side,
             (hub_x, hub_y), entrances, base_tile, landscape,
-            landscape_name, feature_names)
+            landscape_name, feature_names, watercourse)
+
+    @staticmethod
+    def _river_vector(connections: tuple[tuple[int, int], ...],
+                      river_cells: list[tuple[int, int]]) -> tuple[int, int]:
+        if len(connections) >= 2:
+            first, second = max(
+                ((first, second)
+                 for index, first in enumerate(connections)
+                 for second in connections[index + 1:]),
+                key=lambda pair: (
+                    (pair[1][0] - pair[0][0]) ** 2
+                    + (pair[1][1] - pair[0][1]) ** 2),
+            )
+            dx, dy = second[0] - first[0], second[1] - first[1]
+        elif connections:
+            dx, dy = connections[0]
+        elif river_cells:
+            dx = max(item[0] for item in river_cells) - min(
+                item[0] for item in river_cells)
+            dy = max(item[1] for item in river_cells) - min(
+                item[1] for item in river_cells)
+        else:
+            return 0, 1
+
+        if abs(dx) >= abs(dy) * 2:
+            return 1, 0
+        if abs(dy) >= abs(dx) * 2:
+            return 0, 1
+        if dx < 0:
+            dx, dy = -dx, -dy
+        return 1, 1 if dx * dy >= 0 else -1
 
     def _landscape_type(self, geography, sx: int, sy: int) -> str:
         scores: dict[str, float] = {}
@@ -770,18 +902,16 @@ class LocalMapBuilder:
         seed = world.seed
         river_phase = self._phase(seed, settlement.id, "river")
         if profile.layout_type == "river":
-            if profile.water_axis == "vertical":
-                base = width * (2 if profile.water_side == "east" else 1) // 3
-                for y in range(height):
-                    center = base + int(math.sin(y / 7.0 + river_phase) * 3)
-                    for x in range(center - 1, center + 2):
-                        self._set(tiles, profile, x, y, TILE_WATER)
-            else:
-                base = height * (2 if profile.water_side == "south" else 1) // 3
-                for x in range(width):
-                    center = base + int(math.sin(x / 8.0 + river_phase) * 3)
-                    for y in range(center - 1, center + 2):
-                        self._set(tiles, profile, x, y, TILE_WATER)
+            start, end = profile.watercourse
+            tangent_x, tangent_y = end[0] - start[0], end[1] - start[1]
+            length = max(1.0, math.hypot(tangent_x, tangent_y))
+            bend = math.sin(river_phase) * 3.0
+            midpoint = (
+                round((start[0] + end[0]) / 2 - tangent_y / length * bend),
+                round((start[1] + end[1]) / 2 + tangent_x / length * bend),
+            )
+            paint_watercourse(
+                tiles, width, height, (start, midpoint, end), radius=1)
         elif profile.layout_type == "harbor":
             depth = max(7, min(width, height) // 8)
             for y in range(height):
@@ -1006,17 +1136,23 @@ class LocalMapBuilder:
             self._carve_ring(tiles, roads, profile, profile.hub,
                              radius_x, radius_y)
         elif profile.layout_type == "river":
-            if profile.water_axis == "vertical":
-                # Crossing streets must run perpendicular to the river.  The
-                # previous orientation produced roads along each bank and no
-                # guaranteed way across the water.
-                for y in (profile.height // 3, profile.height * 2 // 3):
-                    self._carve_path(tiles, roads, profile,
-                                     (3, y), (profile.width - 4, y), y)
-            else:
-                for x in (profile.width // 3, profile.width * 2 // 3):
-                    self._carve_path(tiles, roads, profile,
-                                     (x, 3), (x, profile.height - 4), x)
+            river_start, river_end = profile.watercourse
+            tangent = (
+                river_end[0] - river_start[0],
+                river_end[1] - river_start[1],
+            )
+            normal = (-tangent[1], tangent[0])
+            for index, fraction in enumerate((1 / 3, 2 / 3)):
+                crossing = (
+                    river_start[0] + tangent[0] * fraction,
+                    river_start[1] + tangent[1] * fraction,
+                )
+                road_start, road_end = line_box_endpoints(
+                    crossing, normal, profile.width, profile.height, inset=3)
+                self._carve_path(
+                    tiles, roads, profile, road_start, road_end,
+                    self._stable_int(
+                        settlement.id, "river_crossing", str(index)))
         else:
             self._carve_ring(tiles, roads, profile, profile.hub,
                              max(12, profile.width // 5),
