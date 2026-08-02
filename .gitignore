@@ -21,6 +21,11 @@ data/worlds/
 # Frontend dependencies (the built player prototype is kept in player/dist)
 player/node_modules/
 
+# PyInstaller and packaged releases
+build/
+dist/
+release/
+
 # Editor and operating-system files
 .idea/
 .vscode/
