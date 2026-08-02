@@ -382,6 +382,9 @@ class LocalMapEntity:
     discovered_count: int = 0
     placement_kind: str = ""
     storage_site_id: str = ""
+    shelf_id: str = ""
+    book_count: int = 0
+    library_total: int = 0
     blocks_movement: bool = True
 
     def to_dict(self) -> dict:
@@ -553,6 +556,11 @@ class LocalMapBuilder:
                 blocks_movement=blocks_movement,
             ))
 
+        entities.extend(self._library_shelf_entities(
+            world, settlement, buildings, zone_candidates, roads, tiles,
+            profile, player_start, occupied, protected, blocking_entities,
+            required_doors, interaction_targets))
+
         temple_fixtures = self._temple_fixtures(
             world, settlement, buildings, occupied, protected,
             tiles, profile)
@@ -638,6 +646,62 @@ class LocalMapBuilder:
                 world.get_historical_sites_at(
                     int(settlement.grid_x), int(settlement.grid_y))),
         }
+
+    def _library_shelf_entities(
+            self, world, settlement, buildings, zone_candidates, roads,
+            tiles, profile, player_start, occupied, protected,
+            blocking_entities, required_doors,
+            interaction_targets) -> list[LocalMapEntity]:
+        books = world.get_library_books(settlement.id)
+        if not books:
+            return []
+        by_shelf: dict[str, list] = {}
+        for book in books:
+            by_shelf.setdefault(book.shelf_id, []).append(book)
+        candidates = self._placement_candidates(
+            "bookshelf", "library", zone_candidates, buildings,
+            roads, tiles, profile)
+        result = []
+        for index, (shelf_id, shelf_books) in enumerate(sorted(by_shelf.items())):
+            position = self._next_evidence_position(
+                candidates, occupied, protected, blocking_entities,
+                required_doors, interaction_targets, index, False,
+                tiles, profile, player_start)
+            occupied.add(position)
+            interaction_targets.add(position)
+            collection = world.storage_sites.get(shelf_books[0].collection_id)
+            condition_value = collection.condition if collection else 1.0
+            condition = (
+                "完好" if condition_value >= 0.7 else
+                "受损" if condition_value >= 0.3 else "严重损坏")
+            accessibility = (
+                collection.accessibility if collection else "supervised")
+            result.append(LocalMapEntity(
+                id=shelf_id,
+                kind="bookshelf",
+                x=position[0],
+                y=position[1],
+                name=f"馆藏书架 {index + 1}",
+                subtype="library_shelf",
+                role=accessibility,
+                role_name=ACCESSIBILITY_NAMES.get(accessibility, accessibility),
+                state="cataloged",
+                material="wood",
+                zone=(collection.name if collection
+                      else f"{settlement.name}藏书室"),
+                description_cn=(
+                    f"这组书架编有目录，存放 {len(shelf_books)} 册；"
+                    f"全馆现有 {len(books)} 册普通馆藏。"
+                    "它们不自动作为历史证据，但可以逐册阅读。"),
+                condition=condition,
+                placement_kind="bookshelf",
+                storage_site_id=(collection.id if collection else ""),
+                shelf_id=shelf_id,
+                book_count=len(shelf_books),
+                library_total=len(books),
+                blocks_movement=False,
+            ))
+        return result
 
     @staticmethod
     def _grave_candidates(

@@ -38,9 +38,10 @@ import {
 } from "lucide-react";
 import { performAction, startSession } from "./api";
 import GameCanvas from "./GameCanvas";
+import ItemPixelArt from "./ItemPixelArt";
 import LocalMiniMap from "./LocalMiniMap";
 import WorldMapView from "./WorldMapView";
-import type { ActionResult, Journal, MapEntity, PlayerState, RuntimeState } from "./types";
+import type { ActionResult, Journal, LibraryBook, MapEntity, PlayerState, RuntimeState } from "./types";
 import {
   advanceTutorial,
   applyTutorialEvent,
@@ -116,6 +117,7 @@ export default function App() {
   const [examinedIds, setExaminedIds] = useState<Set<string>>(new Set());
   const [readIds, setReadIds] = useState<Set<string>>(new Set());
   const [compareIds, setCompareIds] = useState<string[]>([]);
+  const [libraryBooks, setLibraryBooks] = useState<LibraryBook[]>([]);
   const [dockTab, setDockTab] = useState<DockTab>("inspect");
   const [journalTab, setJournalTab] = useState<JournalTab>("observations");
   const [detail, setDetail] = useState<ActionResult | null>(null);
@@ -154,6 +156,7 @@ export default function App() {
       setExaminedIds(new Set());
       setReadIds(new Set());
       setCompareIds([]);
+      setLibraryBooks([]);
       setDetail(null);
       setDockTab("inspect");
       setViewMode("local");
@@ -181,6 +184,7 @@ export default function App() {
         const result = await performAction(sessionId, payload);
         if (result.journal) setJournal(result.journal);
         if (result.runtime) setRuntime(result.runtime);
+        if (result.library_books) setLibraryBooks(result.library_books);
         if (result.local_map) {
           setState((current) => current ? {
             ...current,
@@ -202,7 +206,7 @@ export default function App() {
         if (payload.action === "read") {
           setReadIds((current) => new Set(current).add(String(payload.evidence_id)));
         }
-        if (["examine", "read", "search_container", "consult", "talk", "inspect_wilderness"].includes(String(payload.action))) {
+        if (["examine", "read", "search_container", "browse_bookshelf", "read_library_book", "consult", "talk", "inspect_wilderness"].includes(String(payload.action))) {
           recordTutorialEvent("investigate");
         }
         return result;
@@ -230,6 +234,7 @@ export default function App() {
         setActiveEvidenceId(null);
         setNearbyIds([]);
         setCompareIds([]);
+        setLibraryBooks([]);
         setDetail(null);
       } else if (result.local_map) {
         setState((current) => current ? {
@@ -268,6 +273,7 @@ export default function App() {
       setActiveEvidenceId(null);
       setNearbyIds([]);
       setCompareIds([]);
+      setLibraryBooks([]);
       setDetail(null);
       setDockTab("inspect");
       setViewMode("local");
@@ -283,6 +289,7 @@ export default function App() {
     setSelected(entity);
     setDockTab(["informant", "resident"].includes(entity.kind) ? "people" : "inspect");
     if (entity.kind === "evidence") setActiveEvidenceId(entity.id);
+    if (entity.kind !== "bookshelf") setLibraryBooks([]);
     recordTutorialEvent("select_entity");
   }, [recordTutorialEvent]);
 
@@ -295,6 +302,8 @@ export default function App() {
       onSelect(entity);
       if (entity.kind === "container") {
         void runAction({ action: "search_container", container_id: entity.id });
+      } else if (entity.kind === "bookshelf") {
+        void runAction({ action: "browse_bookshelf", shelf_id: entity.id });
       } else if (entity.kind === "evidence" && !examinedIds.has(entity.id)) {
         void runAction({ action: "examine", evidence_id: entity.id });
       } else if (["landmark", "camp", "caravan", "traveler", "trace", "wildlife"].includes(entity.kind)) {
@@ -311,6 +320,7 @@ export default function App() {
   ) : false;
   const selectedEvidence = selected?.kind === "evidence" ? selected : null;
   const selectedContainer = selected?.kind === "container" ? selected : null;
+  const selectedBookshelf = selected?.kind === "bookshelf" ? selected : null;
   const selectedWilderness = selected && ["landmark", "camp", "caravan", "traveler", "trace", "wildlife"].includes(selected.kind) ? selected : null;
   const selectedPerson = selected && ["informant", "resident"].includes(selected.kind) ? selected : null;
   const activeEvidence = useMemo(
@@ -554,7 +564,7 @@ export default function App() {
           <div className="dock-content">
             {dockTab === "inspect" && (
               <InspectPanel
-                selected={selectedEvidence ?? selectedContainer ?? selectedWilderness}
+                selected={selectedEvidence ?? selectedContainer ?? selectedBookshelf ?? selectedWilderness}
                 nearby={selectedIsNearby}
                 examined={selectedEvidence ? examinedIds.has(selectedEvidence.id) : false}
                 read={selectedEvidence ? readIds.has(selectedEvidence.id) : false}
@@ -562,8 +572,11 @@ export default function App() {
                 detail={detail}
                 busy={busy}
                 evidence={state?.local_map.discovered_evidence ?? []}
+                libraryBooks={libraryBooks}
                 onSelect={onSelect}
                 onSearch={(id) => void runAction({ action: "search_container", container_id: id })}
+                onBrowseBookshelf={(id) => void runAction({ action: "browse_bookshelf", shelf_id: id })}
+                onReadLibraryBook={(id) => void runAction({ action: "read_library_book", book_id: id })}
                 onExamine={(id) => void runAction({ action: "examine", evidence_id: id })}
                 onRead={(id) => void runAction({ action: "read", evidence_id: id })}
                 onInspectWilderness={(id) => void runAction({ action: "inspect_wilderness", entity_id: id })}
@@ -742,9 +755,12 @@ function InspectPanel(props: {
   detail: ActionResult | null;
   busy: boolean;
   evidence: MapEntity[];
+  libraryBooks: LibraryBook[];
   entities: MapEntity[];
   onSelect: (entity: MapEntity) => void;
   onSearch: (id: string) => void;
+  onBrowseBookshelf: (id: string) => void;
+  onReadLibraryBook: (id: string) => void;
   onExamine: (id: string) => void;
   onRead: (id: string) => void;
   onInspectWilderness: (id: string) => void;
@@ -753,12 +769,23 @@ function InspectPanel(props: {
   onClearDetail: () => void;
 }) {
   const { selected, detail } = props;
+  const [catalogQuery, setCatalogQuery] = useState("");
+  const [catalogGenre, setCatalogGenre] = useState("all");
   const isContainer = selected?.kind === "container";
+  const isBookshelf = selected?.kind === "bookshelf";
   const isWilderness = Boolean(
     selected && ["landmark", "camp", "caravan", "traveler", "trace", "wildlife"].includes(selected.kind));
   const visibleEvidence = isContainer
     ? props.evidence.filter((item) => item.container_id === selected.id)
     : props.evidence;
+  const normalizedQuery = catalogQuery.trim().toLocaleLowerCase();
+  const visibleBooks = props.libraryBooks.filter((book) => (
+    (catalogGenre === "all" || book.genre === catalogGenre)
+    && (!normalizedQuery || `${book.title} ${book.author_name} ${book.genre_name}`.toLocaleLowerCase().includes(normalizedQuery))
+  ));
+  const catalogGenres = Array.from(new Map(
+    props.libraryBooks.map((book) => [book.genre, book.genre_name]),
+  ).entries());
   return (
     <>
       <section className="panel-heading">
@@ -771,7 +798,7 @@ function InspectPanel(props: {
                 ? ` · ${selected.repair_error_name}`
                 : ""}`
               : ""}。${selected?.description_cn}`
-            : isContainer
+            : isContainer || isBookshelf
             ? `${selected.role_name} · ${selected.condition}。${selected.description_cn}`
             : selected
             ? `${TYPE_LABELS[selected.subtype] ?? selected.subtype} · ${MATERIAL_LABELS[selected.material] ?? selected.material} · ${selected.zone}`
@@ -785,6 +812,13 @@ function InspectPanel(props: {
         <div className="command-row">
           <button className="command-button primary" disabled={!props.nearby || props.busy} onClick={() => props.onSearch(selected.id)}>
             <Search size={15} /> {selected.searched ? "重新搜索" : "搜索此处"}
+          </button>
+        </div>
+      )}
+      {isBookshelf && selected && (
+        <div className="command-row">
+          <button className="command-button primary" disabled={!props.nearby || props.busy} onClick={() => props.onBrowseBookshelf(selected.id)}>
+            <BookOpen size={15} /> {props.libraryBooks.length ? "刷新目录" : `浏览 ${selected.book_count ?? 0} 册馆藏`}
           </button>
         </div>
       )}
@@ -815,11 +849,43 @@ function InspectPanel(props: {
       )}
       {selected && !props.nearby && (
         <p className="proximity-note">
-          {isContainer ? "走到调查地点相邻格后才能搜索。" : "返回证物存放地点旁才能检查或阅读。"}
+          {isBookshelf ? "走到书架相邻格后才能浏览和阅读。" : isContainer ? "走到调查地点相邻格后才能搜索。" : "返回证物存放地点旁才能检查或阅读。"}
         </p>
       )}
 
-      {!isWilderness && <section className="discovered-catalog">
+      {isBookshelf && props.libraryBooks.length > 0 && (
+        <section className="library-catalog">
+          <div className="section-title">
+            <h3>书架目录</h3>
+            <span>{visibleBooks.length}/{props.libraryBooks.length}</span>
+          </div>
+          <div className="catalog-filters">
+            <label>
+              <Search size={14} />
+              <input value={catalogQuery} onChange={(event) => setCatalogQuery(event.target.value)} placeholder="检索书名、作者或主题" />
+            </label>
+            <select value={catalogGenre} onChange={(event) => setCatalogGenre(event.target.value)} aria-label="按主题筛选">
+              <option value="all">全部主题</option>
+              {catalogGenres.map(([id, name]) => <option value={id} key={id}>{name}</option>)}
+            </select>
+          </div>
+          <div className="library-book-list">
+            {visibleBooks.map((book) => (
+              <div className="library-book-row" key={book.id}>
+                <BookOpen size={17} />
+                <span>
+                  <strong>{book.title}</strong>
+                  <small>{book.genre_name} · {book.author_name} · 第 {book.catalog_number} 号</small>
+                </span>
+                <button className="command-button" disabled={props.busy} onClick={() => props.onReadLibraryBook(book.id)}>阅读</button>
+              </div>
+            ))}
+            {!visibleBooks.length && <p className="catalog-empty">没有符合当前条件的书目。</p>}
+          </div>
+        </section>
+      )}
+
+      {!isWilderness && !isBookshelf && <section className="discovered-catalog">
         <div className="section-title">
           <h3>{isContainer ? "此处已发现的材料" : "已发现证物"}</h3>
           <span>{visibleEvidence.length}</span>
@@ -988,14 +1054,34 @@ function ActionDetail({ detail, onClose }: { detail: ActionResult | null; onClos
       </section>
     );
   }
+  const evidence = detail.evidence && !Array.isArray(detail.evidence) ? detail.evidence : null;
   return (
     <section className="action-detail">
       <div className="section-title">
         <h3>{actionTitle(detail.action)}</h3>
         {onClose && <button className="icon-command quiet" title="关闭结果" onClick={onClose}><X size={15} /></button>}
       </div>
+      {detail.action === "examine" && detail.item_visual && evidence && (
+        <ItemPixelArt profile={detail.item_visual} label={value(evidence, "observed_name") || "未识别物件"} />
+      )}
       {detail.description_cn && <p className="long-copy">{detail.description_cn}</p>}
       {detail.text_cn && <p className="long-copy reading-copy">{detail.text_cn}</p>}
+      {detail.action === "read_library_book" && detail.readability_ratio != null && (
+        <div className="book-condition" role="status">
+          <span>可读内容 {Math.round(detail.readability_ratio * 100)}%</span>
+          {detail.damage_labels?.map((label) => <span key={label}>{label}</span>)}
+        </div>
+      )}
+      {detail.library_sections && (
+        <div className="book-sections">
+          {detail.library_sections.map((section, index) => (
+            <section className={section.status === "missing" ? "missing" : section.status === "damaged" ? "damaged" : ""} key={`${section.heading}-${index}`}>
+              <h4>{section.heading}</h4>
+              <p>{section.text}</p>
+            </section>
+          ))}
+        </div>
+      )}
       {detail.dialogue_cn && <blockquote>{detail.dialogue_cn}</blockquote>}
       {detail.discovered_evidence && detail.action === "search_container" && (
         <ul className="evidence-list">
@@ -1115,7 +1201,7 @@ function journalCount(journal: Journal, tab: JournalTab) {
 }
 
 function actionTitle(action: string) {
-  return { examine: "客观检查", read: "文书阅读", consult: "咨询记录", compare: "证物比较", talk: "街头闲谈", inspect_wilderness: "荒野见闻" }[action] ?? "调查结果";
+  return { examine: "客观检查", read: "文书阅读", browse_bookshelf: "馆藏目录", read_library_book: "馆藏阅读", consult: "咨询记录", compare: "证物比较", talk: "街头闲谈", inspect_wilderness: "荒野见闻" }[action] ?? "调查结果";
 }
 
 function move(dx: number, dy: number) {

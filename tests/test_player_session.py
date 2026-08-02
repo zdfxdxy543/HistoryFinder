@@ -486,6 +486,13 @@ def test_examine_read_and_consult_update_safe_journal(player_session):
     consulted = player_session.consult(document_id, informant_id)
 
     assert examined["observations"]
+    assert examined["item_visual"]["kind"] in {
+        "codex", "scroll", "sheet", "tablet"}
+    assert examined["item_visual"]["material"] in {
+        "parchment", "stone", "metal", "wood", "cloth"}
+    assert 0.0 <= examined["item_visual"]["condition"] <= 1.0
+    assert examined["item_visual"] == player_session.examine(
+        document_id)["item_visual"]
     assert read["reading"]["evidence_id"] == document_id
     assert consulted["consultation"]["consultant_id"] == informant_id
     assert FORBIDDEN_KEYS.isdisjoint(_all_keys(examined))

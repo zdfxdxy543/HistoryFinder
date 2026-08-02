@@ -34,6 +34,7 @@ from simulation.evidence import (
 )
 from simulation.records import HistoricalRecord, RecordGenerator
 from simulation.storage import StorageManager, StorageSite
+from simulation.library import LibraryBook, build_library_catalog
 from simulation.technology import TECHNOLOGY_CATALOG
 from simulation.research import generate_research_process
 from simulation.literary_generation import event_theme, role_theme
@@ -153,7 +154,7 @@ THEORETICAL_TITLES = {
     "astronomy": ["行星周期表解", "影长与季节论", "星位观测法"],
 }
 
-WORLD_SCHEMA_VERSION = 19
+WORLD_SCHEMA_VERSION = 20
 
 @dataclass
 class World:
@@ -174,6 +175,7 @@ class World:
     informants: dict[str, Informant] = field(default_factory=dict)
     knowledge_entries: dict[str, KnowledgeEntry] = field(default_factory=dict)
     storage_sites: dict[str, StorageSite] = field(default_factory=dict)
+    library_books: dict[str, LibraryBook] = field(default_factory=dict)
     trade_routes: dict[str, TradeRoute] = field(default_factory=dict)
     road_segments: dict[str, RoadSegment] = field(default_factory=dict)
     travel_groups: dict[str, TravelGroup] = field(default_factory=dict)
@@ -262,6 +264,70 @@ class World:
 
         self.current_year = years
         self._sync_historical_sites()
+        self._sync_library_catalogs()
+
+    def _sync_library_catalogs(self) -> None:
+        """Create ordinary holdings independently from historical evidence."""
+        for settlement in sorted(self.settlements.values(), key=lambda item: item.id):
+            if float(settlement.infrastructure.get("library", 0.0)) < 0.5:
+                continue
+            collection = self._storage_mgr.get_or_create_site(
+                settlement, "library_collection", self.current_year)
+            existing = [
+                item for item in self.library_books.values()
+                if item.settlement_id == settlement.id
+            ]
+            if existing:
+                continue
+            for book in build_library_catalog(
+                    self.seed, settlement, collection.id, self.current_year,
+                    self._library_text_context(settlement)):
+                self.library_books[book.id] = book
+
+    def _library_text_context(self, settlement: Settlement) -> dict:
+        features = (
+            self.geography.nearest_features(
+                settlement.grid_x, settlement.grid_y,
+                max_distance=14.0, limit=4)
+            if self.geography is not None else []
+        )
+        events = sorted(
+            self.get_settlement_events(settlement.id),
+            key=lambda item: (item.year, item.id),
+            reverse=True,
+        )[:12]
+        religion = self.religions.get(settlement.official_religion_id or "")
+        partners = sorted((
+            (
+                relationship.trade_volume,
+                self.settlements[partner_id].name,
+            )
+            for partner_id, relationship in settlement.relationships.items()
+            if partner_id in self.settlements and relationship.trade_volume > 0
+        ), reverse=True)
+        biome_name = (
+            self.geography.get_biome_name(
+                int(settlement.grid_x), int(settlement.grid_y))
+            if self.geography is not None else settlement.biome)
+        return {
+            "place": settlement.name,
+            "biome": biome_name,
+            "features": [feature.name for feature in features],
+            "events": [
+                {"title": event.title, "year": event.year}
+                for event in events
+            ],
+            "religion": religion.name if religion else "当地传统",
+            "trade_partners": [name for _, name in partners[:4]],
+        }
+
+    def get_library_books(self, settlement_id: str,
+                          shelf_id: str | None = None) -> list[LibraryBook]:
+        return sorted((
+            book for book in self.library_books.values()
+            if book.settlement_id == settlement_id
+            and (shelf_id is None or book.shelf_id == shelf_id)
+        ), key=lambda item: item.catalog_number)
 
     def _initialize_runtime_managers(self) -> None:
         self._settlement_mgr = SettlementManager(self.seed)
@@ -2856,6 +2922,8 @@ class World:
                 entry.to_dict() for entry in self.knowledge_entries.values()],
             "storage_sites": [
                 site.to_dict() for site in self.storage_sites.values()],
+            "library_books": [
+                book.to_dict() for book in self.library_books.values()],
             "trade_routes": [
                 route.to_dict() for route in self.trade_routes.values()],
             "road_segments": [
@@ -2899,8 +2967,12 @@ class World:
     def from_dict(cls, data: dict) -> "World":
         """Restore the current world schema and rebuild runtime managers."""
         source_schema = int(data.get("schema_version", 0))
+        needs_site_staff_migration = any(
+            int(item.get("schema_version", 1)) < 2
+            for item in data.get("historical_sites", [])
+        )
         if source_schema not in {
-                12, 13, 14, 15, 16, 17, 18, WORLD_SCHEMA_VERSION}:
+                12, 13, 14, 15, 16, 17, 18, 19, WORLD_SCHEMA_VERSION}:
             raise ValueError(
                 f"unsupported world schema: {data.get('schema_version')!r}; "
                 f"expected {WORLD_SCHEMA_VERSION}")
@@ -2922,7 +2994,7 @@ class World:
             for key in (
                     "historical_sites", "burials", "signposts",
                     "road_segments", "wilderness_camps",
-                    "travel_clock_minutes"):
+                    "travel_clock_minutes", "library_books"):
                 if key not in data:
                     missing.append(key)
         if missing:
@@ -2963,6 +3035,10 @@ class World:
         w.storage_sites = {
             site_data["id"]: StorageSite.from_dict(site_data)
             for site_data in data["storage_sites"]
+        }
+        w.library_books = {
+            item["id"]: LibraryBook.from_dict(item)
+            for item in data.get("library_books", [])
         }
         w.trade_routes = {
             route_data["id"]: TradeRoute.from_dict(route_data)
@@ -3055,8 +3131,9 @@ class World:
                 settlement.religious_presence = {tradition.id: 1.0}
                 settlement.official_religion_id = tradition.id
         w._restore_runtime_manager_state()
-        if source_schema < WORLD_SCHEMA_VERSION:
+        if source_schema < WORLD_SCHEMA_VERSION or needs_site_staff_migration:
             w._sync_historical_sites()
+            w._sync_library_catalogs()
         w._validate_political_state()
         w._pressures_cache = compute_all_pressures(w)
         return w
@@ -3283,27 +3360,34 @@ def _validate_serialized_versions(data: dict) -> None:
         "informants": 1,
         "knowledge_entries": 1,
         "storage_sites": 1,
+        "library_books": (1, 2),
     }
     for collection, schema_version in expected.items():
-        for item in data[collection]:
-            if item.get("schema_version") != schema_version:
+        accepted = (
+            schema_version if isinstance(schema_version, tuple)
+            else (schema_version,)
+        )
+        for item in data.get(collection, []):
+            if item.get("schema_version") not in accepted:
                 raise ValueError(
                     f"unsupported {collection} schema for "
                     f"{item.get('id', '<unknown>')}: "
                     f"{item.get('schema_version')!r}; expected "
-                    f"{schema_version}")
+                    f"{' or '.join(str(value) for value in accepted)}")
     for item in data.get("religions", []):
         if item.get("schema_version") != 1:
             raise ValueError(
                 f"unsupported religions schema for {item.get('id', '<unknown>')}: "
                 f"{item.get('schema_version')!r}; expected 1")
     for collection in ("historical_sites", "burials"):
+        accepted = (1, 2) if collection == "historical_sites" else (1,)
         for item in data.get(collection, []):
-            if item.get("schema_version") != 1:
+            if item.get("schema_version") not in accepted:
                 raise ValueError(
                     f"unsupported {collection} schema for "
                     f"{item.get('id', '<unknown>')}: "
-                    f"{item.get('schema_version')!r}; expected 1")
+                    f"{item.get('schema_version')!r}; expected "
+                    f"{' or '.join(str(value) for value in accepted)}")
     for item in data.get("signposts", []):
         if item.get("schema_version") != 1:
             raise ValueError(

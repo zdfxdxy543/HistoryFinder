@@ -90,6 +90,12 @@ class PlayerSessionStore:
             if action == "search_container":
                 return session.search_container(
                     str(payload.get("container_id", "")))
+            if action == "browse_bookshelf":
+                return session.browse_bookshelf(
+                    str(payload.get("shelf_id", "")))
+            if action == "read_library_book":
+                return session.read_library_book(
+                    str(payload.get("book_id", "")))
             if action == "move":
                 return session.move(
                     int(payload.get("dx", 0)), int(payload.get("dy", 0)))

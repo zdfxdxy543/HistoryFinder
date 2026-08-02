@@ -667,6 +667,22 @@ class SettlementScene extends Phaser.Scene {
         shape.fillRoundedRect(-7, 0, 14, 15, 2);
         shape.lineStyle(1.5, 0x26312b, 0.85);
         shape.strokeRoundedRect(-7, 0, 14, 15, 2);
+      } else if (entity.kind === "bookshelf") {
+        shape.fillStyle(0x765437, 1);
+        shape.fillRect(-12, -16, 24, 31);
+        shape.lineStyle(2, 0x35271e, 1);
+        shape.strokeRect(-12, -16, 24, 31);
+        shape.lineBetween(-11, -6, 11, -6);
+        shape.lineBetween(-11, 5, 11, 5);
+        [0x9f4f44, 0x58758a, 0xc49b4e, 0x55745c, 0x795f8c].forEach((color, index) => {
+          shape.fillStyle(color, 1);
+          shape.fillRect(-9 + index * 4, -14, 3, 7 + (index % 3));
+          shape.fillRect(-9 + ((index + 2) % 5) * 4, -4, 3, 6 + ((index + 1) % 3));
+        });
+        shape.fillStyle(0xe0c47e, 1);
+        shape.fillRect(-7, 8, 14, 5);
+        shape.lineStyle(1, 0x66502f, 1);
+        shape.lineBetween(-4, 10, 4, 10);
       } else if (entity.kind === "container") {
         const muted = entity.searched ? 0x718276 : 0x8c6745;
         if (["bookshelf", "ledger_shelf"].includes(entity.placement_kind ?? "")) {

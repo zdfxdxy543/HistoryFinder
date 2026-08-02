@@ -17,6 +17,7 @@ from game.investigation import (
     build_reading_statements,
 )
 from game.knowledge import PlayerKnowledge
+from game.item_visual import build_item_visual
 from game.local_map import build_evidence_targets
 from game.local_time import LocalTimeSimulation
 from game.world_cell_map import (
@@ -42,6 +43,7 @@ from simulation.text_carriers import (
     has_text_carrier,
     materialize_text_carrier,
 )
+from simulation.library import render_library_book
 
 
 ROLE_NAMES = {
@@ -192,6 +194,7 @@ class PlayerSession:
         return self._finish_action({
             "action": "examine",
             "evidence": self._evidence_payload(evidence),
+            "item_visual": build_item_visual(evidence),
             "description_cn": describe_evidence(build_evidence_context(evidence)),
             "observations": [item.to_dict() for item in observations],
             "new_observation_count": added,
@@ -264,6 +267,83 @@ class PlayerSession:
             "local_map": self.local_map,
             "journal": self.journal_payload(),
         }, minutes)
+
+    def browse_bookshelf(self, shelf_id: str) -> dict:
+        shelf = next((
+            item for item in self.local_map["entities"]
+            if item["kind"] == "bookshelf" and item["id"] == shelf_id
+        ), None)
+        if shelf is None:
+            raise PlayerActionError("这里找不到这组馆藏书架。")
+        distance = (
+            abs(shelf["x"] - self.local_time.player["x"])
+            + abs(shelf["y"] - self.local_time.player["y"])
+        )
+        if distance > 1:
+            raise PlayerActionError("需要先走到书架旁边。")
+        books = self.world.get_library_books(
+            self._active_location_id(), shelf_id)
+        if not books:
+            raise PlayerActionError("这组书架目前没有可查阅的馆藏。")
+        shelf["searched"] = True
+        shelf["discovered_count"] = len(books)
+        return self._finish_action({
+            "action": "browse_bookshelf",
+            "bookshelf": {
+                "id": shelf["id"],
+                "name": shelf["name"],
+                "book_count": len(books),
+                "condition": shelf["condition"],
+            },
+            "library_books": [book.public_payload() for book in books],
+            "description_cn": (
+                f"你按馆藏编号浏览了这组书架，共找到 {len(books)} 册书。"
+                "这些普通馆藏不会自动记作历史证据。"),
+            "local_map": self.local_map,
+        }, 10)
+
+    def read_library_book(self, book_id: str) -> dict:
+        book = self.world.library_books.get(book_id)
+        if book is None or book.settlement_id != self._active_location_id():
+            raise PlayerActionError("这里找不到这本馆藏。")
+        shelf = next((
+            item for item in self.local_map["entities"]
+            if item["kind"] == "bookshelf" and item["id"] == book.shelf_id
+        ), None)
+        if shelf is None:
+            raise PlayerActionError("这本书所在的书架目前不可访问。")
+        distance = (
+            abs(shelf["x"] - self.local_time.player["x"])
+            + abs(shelf["y"] - self.local_time.player["y"])
+        )
+        if distance > 1:
+            raise PlayerActionError("需要留在书架旁边阅读。")
+        if book.language_code not in self.known_languages:
+            text = "你能辨认书名和目录编号，但无法读懂正文所用的语言。"
+            status = "unknown_language"
+        else:
+            reading = render_library_book(book)
+            text = reading["front_matter"]
+            status = "readable"
+        if status == "readable":
+            front_matter = reading["front_matter"]
+            sections = reading["sections"]
+            readability_ratio = reading["readability_ratio"]
+            damage_labels = reading["damage_labels"]
+        else:
+            front_matter = text
+            sections = []
+            readability_ratio = None
+            damage_labels = []
+        return self._finish_action({
+            "action": "read_library_book",
+            "library_book": {**book.public_payload(), "status": status},
+            "text_cn": front_matter,
+            "library_sections": sections,
+            "readability_ratio": readability_ratio,
+            "damage_labels": damage_labels,
+            "description_cn": f"你从{self.world.storage_sites[book.collection_id].name}取下{book.title}。",
+        }, 20)
 
     def read(self, evidence_id: str) -> dict:
         candidate = self.world.evidence.get(evidence_id)

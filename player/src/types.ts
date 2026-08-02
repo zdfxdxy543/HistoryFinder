@@ -1,6 +1,6 @@
 export type MapEntity = {
   id: string;
-  kind: "evidence" | "container" | "informant" | "resident" | "landmark" | "camp" | "caravan" | "traveler" | "trace" | "wildlife";
+  kind: "evidence" | "container" | "bookshelf" | "informant" | "resident" | "landmark" | "camp" | "caravan" | "traveler" | "trace" | "wildlife";
   x: number;
   y: number;
   name: string;
@@ -20,6 +20,9 @@ export type MapEntity = {
   storage_position?: string;
   placement_kind?: string;
   storage_site_id?: string;
+  shelf_id?: string;
+  book_count?: number;
+  library_total?: number;
   blocks_movement?: boolean;
   can_read?: boolean;
   quick_read?: boolean;
@@ -213,6 +216,24 @@ export type Journal = {
   comparisons: Array<Record<string, unknown>>;
 };
 
+export type LibraryBook = {
+  id: string;
+  shelf_id: string;
+  catalog_number: number;
+  title: string;
+  genre: string;
+  genre_name: string;
+  author_name: string;
+  language_code: string;
+  created_year: number;
+  origin_name: string;
+  condition: "intact" | "worn" | "fragile";
+  form: string;
+  audience: string;
+  length_class: "short" | "single_volume" | "multi_volume" | "";
+  status?: "readable" | "unknown_language";
+};
+
 export type PlayerState = {
   mode: "player_safe";
   world: { seed: number; name: string; current_year: number };
@@ -237,6 +258,7 @@ export type ActionResult = {
   action: string;
   journal?: Journal;
   evidence?: Record<string, unknown> | Array<Record<string, unknown>>;
+  item_visual?: ItemVisualProfile;
   description_cn?: string;
   text_cn?: string;
   observations?: Array<Record<string, unknown>>;
@@ -257,9 +279,32 @@ export type ActionResult = {
   origin?: { id: string; name: string };
   destination?: { id: string; name: string; site_type: "settlement" | "ruin" };
   container?: Record<string, unknown>;
+  bookshelf?: Record<string, unknown>;
+  library_books?: LibraryBook[];
+  library_book?: LibraryBook;
+  library_sections?: Array<{
+    heading: string;
+    text: string;
+    status?: "readable" | "damaged" | "missing";
+    damage_type?: string;
+    damage_label?: string;
+  }>;
+  readability_ratio?: number | null;
+  damage_labels?: string[];
   discovered_evidence?: MapEntity[];
   subject?: Record<string, unknown>;
   local_map?: LocalMap;
   newly_discovered_count?: number;
   cheats?: CheatState;
+};
+
+export type ItemVisualProfile = {
+  version: number;
+  seed: number;
+  kind: "codex" | "scroll" | "sheet" | "tablet" | "coin" | "seal" | "weapon" | "tool" | "vessel" | "icon" | "model" | "fragment" | "monument" | "ruins" | "layer";
+  material: string;
+  state: string;
+  condition: number;
+  variant: number;
+  damage: Array<"water" | "holes" | "charred" | "cracked" | "rust" | "torn" | "soil" | "faded">;
 };

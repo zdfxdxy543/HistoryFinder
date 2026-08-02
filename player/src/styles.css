@@ -287,16 +287,44 @@ button { color: inherit; }
 .discovered-row small { margin-top: 3px; color: var(--muted); }
 .catalog-empty { margin: 0; padding: 16px 20px; color: var(--muted); line-height: 1.5; }
 
+.library-catalog { border-bottom: 1px solid var(--line); }
+.library-catalog > .section-title { margin: 0; padding: 10px 20px 8px; background: #eef2ed; border-bottom: 1px solid #d8dfd8; }
+.library-catalog > .section-title span { color: var(--muted); font-size: 11px; font-weight: 700; }
+.catalog-filters { display: grid; grid-template-columns: minmax(0, 1fr) 112px; gap: 7px; padding: 10px 20px; background: #f8faf7; border-bottom: 1px solid #dfe5df; }
+.catalog-filters label { min-width: 0; display: flex; align-items: center; gap: 6px; padding: 0 8px; background: #fff; border: 1px solid #aeb8b0; }
+.catalog-filters label:focus-within { border-color: var(--green); box-shadow: 0 0 0 2px rgba(53,107,80,.12); }
+.catalog-filters input { min-width: 0; width: 100%; height: 34px; padding: 5px 0; border: 0; outline: 0; background: transparent; }
+.catalog-filters select { min-width: 0; height: 36px; padding: 5px 7px; color: var(--ink); background: #fff; border: 1px solid #aeb8b0; }
+.library-book-list { max-height: 310px; overflow-y: auto; }
+.library-book-row { min-height: 56px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 8px 20px; border-bottom: 1px solid #e3e8e3; }
+.library-book-row > svg { color: var(--ochre); }
+.library-book-row strong, .library-book-row small { display: block; overflow-wrap: anywhere; }
+.library-book-row small { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.library-book-row .command-button { min-height: 30px; padding: 4px 8px; }
+
 .compare-strip { display: grid; grid-template-columns: minmax(0, 1fr) 34px; align-items: center; gap: 10px; padding: 10px 20px; background: #e9f0f3; border-bottom: 1px solid #c6d7df; }
 .compare-strip div { min-width: 0; }
 .compare-strip span { display: block; color: var(--blue); font-size: 10px; font-weight: 800; }
 .compare-strip strong { display: block; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 
 .action-detail { padding: 16px 20px 28px; }
+.item-pixel-figure { position: relative; margin: 0 0 14px; overflow: hidden; color: #f0f3ef; background: #263129; border: 1px solid #69776d; }
+.item-pixel-figure canvas { display: block; width: 100%; height: auto; max-height: 230px; aspect-ratio: 4 / 3; object-fit: contain; image-rendering: pixelated; image-rendering: crisp-edges; }
+.item-pixel-figure figcaption { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 10px; background: #1e2822; border-top: 1px solid #536058; }
+.item-pixel-figure figcaption span { color: #aeb9b1; font-size: 9px; font-weight: 700; }
+.item-pixel-figure figcaption strong { min-width: 0; overflow-wrap: anywhere; text-align: right; font-size: 11px; }
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 11px; }
 .section-title h3 { margin: 0; font-size: 13px; }
 .long-copy { margin: 0 0 11px; white-space: pre-wrap; line-height: 1.7; overflow-wrap: anywhere; }
 .reading-copy { padding-left: 12px; border-left: 3px solid var(--ochre); }
+.book-condition { display: flex; flex-wrap: wrap; gap: 6px; margin: 11px 0 2px; }
+.book-condition span { padding: 3px 7px; color: #654d25; background: #f4ead6; border: 1px solid #dfc99f; font-size: 10px; font-weight: 700; }
+.book-sections { display: grid; gap: 14px; margin-top: 16px; }
+.book-sections section { padding-top: 12px; border-top: 1px solid var(--line); }
+.book-sections section.damaged { border-top-color: #d5b97c; }
+.book-sections section.missing { color: var(--muted); background: #f5f3ee; padding: 12px; border: 1px dashed #b8ad98; }
+.book-sections h4 { margin: 0 0 6px; color: var(--green); font-size: 12px; }
+.book-sections p { margin: 0; line-height: 1.7; overflow-wrap: anywhere; }
 blockquote { margin: 8px 0; padding: 8px 11px; color: #39443d; background: #f0f3f0; border-left: 3px solid #7c9b87; line-height: 1.6; }
 .evidence-list, .result-group ul { margin: 8px 0 0; padding-left: 18px; }
 .evidence-list li, .result-group li { margin: 5px 0; line-height: 1.5; }
@@ -420,4 +448,5 @@ blockquote { margin: 8px 0; padding: 8px 11px; color: #39443d; background: #f0f3
   .map-key span { font-size: 9px; }
   .journal-tabs button { font-size: 10px; }
   .panel-heading h2 { font-size: 17px; }
+  .catalog-filters { grid-template-columns: 1fr; }
 }

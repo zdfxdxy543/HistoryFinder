@@ -419,6 +419,57 @@ class WorldCellMapBuilder:
                 "bounds": [left, top, right, bottom],
                 "historical_site_id": site.id,
             })
+            active_staff = [
+                item for item in site.staff_members if item.active]
+            if site.state == "damaged":
+                active_staff = active_staff[:max(1, (len(active_staff) + 1) // 2)]
+            staff_positions = [
+                (px, py)
+                for py in range(top + 1, bottom)
+                for px in range(left + 1, right)
+                if tiles[py * width + px] not in BLOCKING_TILES
+            ]
+            staff_positions.sort(key=lambda position: (
+                _stable_int(
+                    site.id, "staff-position",
+                    str(position[0]), str(position[1])),
+                position[1], position[0],
+            ))
+            owner = world.settlements.get(site.owner_settlement_id)
+            for staff_index, staff in enumerate(active_staff):
+                if not staff_positions:
+                    break
+                home = staff_positions[staff_index % len(staff_positions)]
+                work = staff_positions[
+                    (staff_index + max(1, len(staff_positions) // 3))
+                    % len(staff_positions)]
+                midday = staff_positions[
+                    (staff_index + max(1, 2 * len(staff_positions) // 3))
+                    % len(staff_positions)]
+                entities.append(_wilderness_entity(
+                    entity_id=staff.id,
+                    kind="resident",
+                    subtype="site_staff",
+                    position=home,
+                    name=staff.name,
+                    role=staff.role,
+                    role_name=staff.role_name,
+                    zone=zone_name,
+                    description=(
+                        f"{staff.name}在{site.name}担任{staff.role_name}。"
+                        f"这里目前{'仍在修缮中' if site.state == 'damaged' else '仍在正常使用'}。"),
+                    dialogue=_site_staff_dialogue(
+                        site, staff, owner.name if owner is not None else "附近聚落"),
+                    extra={
+                        "material": "cloth",
+                        "state": "site_staff",
+                        "historical_site_id": site.id,
+                        "site_staff": True,
+                        "home_position": list(home),
+                        "work_position": list(work),
+                        "midday_position": list(midday),
+                    },
+                ))
         return buildings, zones, entities, reserved
 
     @staticmethod
@@ -1586,6 +1637,55 @@ def _road_traveler_dialogue(role: str, destination, religion,
         "“刚才经过的路面还算完整，不过旧桥附近最好放慢脚步。”",
         f"“路上有人说{destination_name}仍有落脚处，我打算亲自去确认。”",
     )[variant]
+
+
+def _site_staff_dialogue(site, staff, owner_name: str) -> str:
+    common = {
+        "roadside_inn": (
+            f"“这座驿站由{owner_name}一侧照管，只要商路还通，我们就会留人值守。”",
+            "“赶路的人可以在这里补水歇脚；马匹和货物仍要各自登记。”",
+            "“最近经过的人不算少，天黑后我们会把院门关上，但不会拒绝真正的旅客。”",
+        ),
+        "tollhouse": (
+            f"“这里替{owner_name}登记过路车队，收费和通行记录分开保存。”",
+            "“我们只查道路通行和货物数量，不负责判断旅人的来历。”",
+            "“路况不好时关卡会暂缓放行，免得车队堵在桥边或狭路上。”",
+        ),
+        "farmstead": (
+            f"“这片农庄向{owner_name}供应一部分粮食，余下的才拿去交换。”",
+            "“田里的活按季节排，不是每天都能在院子里找到所有人。”",
+            "“水渠和围栏都要反复修补；看起来安静，不代表这里无人照料。”",
+        ),
+        "mine": (
+            f"“矿场归{owner_name}管理，进出坑道的人和工具每天都要清点。”",
+            "“支撑木和通风比挖得快更重要，发现松动就必须停工。”",
+            "“运出的矿石先在院里分类，成色差的不会混进同一批货。”",
+        ),
+        "logging_camp": (
+            f"“林场替{owner_name}备料，每片林地都有轮换砍伐的次序。”",
+            "“新伐木料要先晾放，直接运走容易在途中开裂。”",
+            "“我们会留下幼树和水边林带，不会把一片地方一次砍空。”",
+        ),
+        "watchtower": (
+            f"“这座哨塔负责替{owner_name}观察道路和荒野动静。”",
+            "“换岗时必须交代火号、来路和人数，不能只说看见了什么。”",
+            "“塔上能看得远，但天气不好时，近处的声音反而更可靠。”",
+        ),
+        "cemetery": (
+            f"“墓园由{owner_name}安排人照看，我负责保持道路和标记可以辨认。”",
+            "“来祭扫的人可以进入，但不能随意移动墓碑或清除旧刻痕。”",
+            "“有些坟墓很久没人来，并不等于可以把它当作无主空地。”",
+        ),
+    }
+    choices = common.get(site.site_type, (
+        f"“我受{owner_name}委托照看这里。”",
+        "“这里仍有人使用，不是无人管理的废墟。”",
+        "“需要帮助可以先说明来意。”",
+    ))
+    line = choices[staff.dialogue_variant % len(choices)]
+    if site.state == "damaged":
+        return line[:-1] + " 这里受过损坏，目前只留下少数人维持运作。" + line[-1]
+    return line
 
 
 def _wilderness_entity(*, entity_id: str, kind: str, subtype: str,

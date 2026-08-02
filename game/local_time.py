@@ -331,7 +331,13 @@ class LocalTimeSimulation:
             travel_cursor = 0
             travel_progress = int(entity.get("travel_progress", 0))
             travel_duration = max(1, int(entity.get("travel_duration", 180)))
-            if travel_path and travel_mode == "loop":
+            if entity.get("site_staff"):
+                home = self._entity_target(
+                    entity, "home_position", (entity["x"], entity["y"]))
+                work = self._entity_target(entity, "work_position", home)
+                midday = self._entity_target(
+                    entity, "midday_position", work)
+            elif travel_path and travel_mode == "loop":
                 cycle = max(1, 2 * len(travel_path) - 2)
                 absolute_minute = (self.day - 1) * 24 * 60 + self.minute_of_day
                 travel_cursor = (
@@ -385,6 +391,14 @@ class LocalTimeSimulation:
                 "travel_progress": travel_progress,
                 "travel_duration": travel_duration,
             }
+
+    def _entity_target(self, entity: dict, key: str,
+                       fallback: tuple[int, int]) -> tuple[int, int]:
+        value = entity.get(key, fallback)
+        position = (int(value[0]), int(value[1]))
+        if self._in_bounds(position) and self._is_walkable(position):
+            return position
+        return fallback
 
     def _wildlife_roam_positions(
             self, origin: tuple[int, int], entity_id: str

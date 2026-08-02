@@ -5,14 +5,63 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 
+from simulation.names import generate_name
+
 
 SITE_STATES = {"active", "damaged", "abandoned", "ruined", "restored"}
 CEMETERY_PLOT_CAPACITY = 6
+
+SITE_STAFFING = {
+    "roadside_inn": (("innkeeper", "驿站掌柜"), ("hostler", "马夫")),
+    "tollhouse": (("toll_keeper", "关卡税吏"), ("road_guard", "道路守卫")),
+    "farmstead": (("farmer", "农庄主人"), ("farmhand", "农庄雇工")),
+    "mine": (("mine_foreman", "矿场工头"), ("miner", "矿工"), ("miner", "矿工")),
+    "logging_camp": (("logging_foreman", "林场工头"), ("woodcutter", "伐木工"), ("woodcutter", "伐木工")),
+    "watchtower": (("watch_captain", "哨塔长"), ("sentry", "哨兵")),
+    "cemetery": (("groundskeeper", "墓园看守"),),
+}
 
 
 def _stable_int(*parts: str) -> int:
     return int.from_bytes(hashlib.sha256(
         "|".join(parts).encode("utf-8")).digest()[:8], "big")
+
+
+@dataclass
+class HistoricalSiteStaff:
+    id: str
+    name: str
+    role: str
+    role_name: str
+    created_year: int
+    active: bool = True
+    dialogue_variant: int = 0
+    schema_version: int = 1
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "id": self.id,
+            "name": self.name,
+            "role": self.role,
+            "role_name": self.role_name,
+            "created_year": self.created_year,
+            "active": self.active,
+            "dialogue_variant": self.dialogue_variant,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "HistoricalSiteStaff":
+        return cls(
+            id=str(data["id"]),
+            name=str(data["name"]),
+            role=str(data["role"]),
+            role_name=str(data["role_name"]),
+            created_year=int(data.get("created_year", 0)),
+            active=bool(data.get("active", True)),
+            dialogue_variant=int(data.get("dialogue_variant", 0)),
+            schema_version=1,
+        )
 
 
 @dataclass
@@ -30,8 +79,9 @@ class HistoricalSite:
     source_event_ids: list[str] = field(default_factory=list)
     evidence_ids: list[str] = field(default_factory=list)
     condition: float = 1.0
+    staff_members: list[HistoricalSiteStaff] = field(default_factory=list)
     revision: int = 1
-    schema_version: int = 1
+    schema_version: int = 2
 
     def __post_init__(self) -> None:
         if self.state not in SITE_STATES:
@@ -57,6 +107,7 @@ class HistoricalSite:
             "source_event_ids": list(self.source_event_ids),
             "evidence_ids": list(self.evidence_ids),
             "condition": self.condition,
+            "staff_members": [item.to_dict() for item in self.staff_members],
             "revision": self.revision,
         }
 
@@ -81,8 +132,12 @@ class HistoricalSite:
             source_event_ids=list(data.get("source_event_ids", [])),
             evidence_ids=list(data.get("evidence_ids", [])),
             condition=float(data.get("condition", 1.0)),
+            staff_members=[
+                HistoricalSiteStaff.from_dict(item)
+                for item in data.get("staff_members", [])
+            ],
             revision=int(data.get("revision", 1)),
-            schema_version=int(data.get("schema_version", 1)),
+            schema_version=2,
         )
 
 
@@ -146,6 +201,7 @@ class HistoricalSiteManager:
         self._sync_route_sites(world)
         self._sync_event_ruins(world)
         self._sync_rural_sites(world)
+        self._sync_site_staff()
         created = self._sync_burials(world)
         self._sync_abandoned_cemeteries(world)
         return created
@@ -330,10 +386,33 @@ class HistoricalSiteManager:
                     source_event_ids=source_ids[-2:],
                     condition=0.82 if settlement.alive else 0.3,
                 )
+            else:
+                site = self.sites[site_id]
+                expected_state = "active" if settlement.alive else "abandoned"
+                expected_abandoned = None if settlement.alive else world.current_year
+                expected_condition = 0.82 if settlement.alive else 0.3
+                if (site.state != expected_state
+                        or site.abandoned_year != expected_abandoned
+                        or site.condition != expected_condition):
+                    site.state = expected_state
+                    site.abandoned_year = expected_abandoned
+                    site.condition = expected_condition
+                    site.revision += 1
             if settlement.infrastructure.get("fortification", 0.0) <= 0:
                 continue
             watch_id = f"site_watchtower_{settlement.id}"
             if watch_id in self.sites:
+                watch = self.sites[watch_id]
+                expected_state = "active" if settlement.alive else "ruined"
+                expected_abandoned = None if settlement.alive else world.current_year
+                expected_condition = 0.85 if settlement.alive else 0.22
+                if (watch.state != expected_state
+                        or watch.abandoned_year != expected_abandoned
+                        or watch.condition != expected_condition):
+                    watch.state = expected_state
+                    watch.abandoned_year = expected_abandoned
+                    watch.condition = expected_condition
+                    watch.revision += 1
                 continue
             cell = self._nearby_cell(
                 world, settlement, "watchtower", radius=5,
@@ -353,6 +432,43 @@ class HistoricalSiteManager:
                 source_event_ids=source_ids[-3:],
                 condition=0.85 if settlement.alive else 0.22,
             )
+
+    def _sync_site_staff(self) -> None:
+        for site in sorted(self.sites.values(), key=lambda item: item.id):
+            staffing = SITE_STAFFING.get(site.site_type, ())
+            if not staffing:
+                continue
+            operational = site.state in {"active", "damaged", "restored"}
+            changed = False
+            while len(site.staff_members) < len(staffing):
+                index = len(site.staff_members)
+                role, role_name = staffing[index]
+                seed = _stable_int(
+                    str(self.seed), site.id, role, str(index), "staff")
+                name = generate_name(seed, "ruler")
+                used_names = {item.name for item in site.staff_members}
+                attempt = 0
+                while name in used_names:
+                    attempt += 1
+                    name = generate_name(
+                        seed + attempt * 1_000_003, "ruler")
+                site.staff_members.append(HistoricalSiteStaff(
+                    id=f"site_staff_{site.id}_{index + 1:02d}",
+                    name=name,
+                    role=role,
+                    role_name=role_name,
+                    created_year=max(0, site.founded_year),
+                    active=operational,
+                    dialogue_variant=_stable_int(
+                        str(self.seed), site.id, str(index), "dialogue") % 3,
+                ))
+                changed = True
+            for staff in site.staff_members:
+                if staff.active != operational:
+                    staff.active = operational
+                    changed = True
+            if changed:
+                site.revision += 1
 
     def _sync_burials(self, world) -> list[BurialRecord]:
         by_person = {item.person_id for item in self.burials.values()}
