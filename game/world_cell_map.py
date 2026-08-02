@@ -6,6 +6,8 @@ import hashlib
 import math
 from collections import deque
 
+from game.person_visual import build_person_visual
+
 from simulation.religion import primary_religion
 from simulation.historical_sites import site_signature
 
@@ -1710,6 +1712,9 @@ def _wilderness_entity(*, entity_id: str, kind: str, subtype: str,
         "blocks_movement": True,
         "dynamic": dynamic,
     }
+    if kind in {"informant", "resident"}:
+        result["portrait_visual"] = build_person_visual(
+            entity_id, role, state=result["state"])
     result.update(extra or {})
     return result
 

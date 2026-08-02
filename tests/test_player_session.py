@@ -431,6 +431,8 @@ def test_talking_to_resident_is_safe_and_does_not_create_claims(player_session):
 
     assert result["action"] == "talk"
     assert result["resident"]["role_name"]
+    assert result["resident"]["portrait_visual"]
+    assert result["resident"]["portrait_visual"] == resident["portrait_visual"]
     assert result["dialogue_cn"]
     assert FORBIDDEN_KEYS.isdisjoint(_all_keys(result))
     assert player_session.journal_payload()["counts"]["claims"] == claims_before

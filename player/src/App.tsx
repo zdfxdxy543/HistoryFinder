@@ -40,8 +40,9 @@ import { performAction, startSession } from "./api";
 import GameCanvas from "./GameCanvas";
 import ItemPixelArt from "./ItemPixelArt";
 import LocalMiniMap from "./LocalMiniMap";
+import PersonPixelPortrait from "./PersonPixelPortrait";
 import WorldMapView from "./WorldMapView";
-import type { ActionResult, Journal, LibraryBook, MapEntity, PlayerState, RuntimeState } from "./types";
+import type { ActionResult, Journal, LibraryBook, MapEntity, PersonVisualProfile, PlayerState, RuntimeState } from "./types";
 import {
   advanceTutorial,
   applyTutorialEvent,
@@ -1055,6 +1056,8 @@ function ActionDetail({ detail, onClose }: { detail: ActionResult | null; onClos
     );
   }
   const evidence = detail.evidence && !Array.isArray(detail.evidence) ? detail.evidence : null;
+  const speaker = detail.action === "talk" ? detail.resident : detail.action === "consult" ? detail.consultant : null;
+  const portrait = speaker?.portrait_visual as PersonVisualProfile | undefined;
   return (
     <section className="action-detail">
       <div className="section-title">
@@ -1063,6 +1066,19 @@ function ActionDetail({ detail, onClose }: { detail: ActionResult | null; onClos
       </div>
       {detail.action === "examine" && detail.item_visual && evidence && (
         <ItemPixelArt profile={detail.item_visual} label={value(evidence, "observed_name") || "未识别物件"} />
+      )}
+      {speaker && portrait && (
+        <section className="conversation-speaker">
+          <div className="person-pixel-portrait">
+            <PersonPixelPortrait profile={portrait} name={value(speaker, "name")} />
+          </div>
+          <div className="conversation-speaker-copy">
+            <span>{detail.action === "consult" ? "正在接受咨询" : "正在与你交谈"}</span>
+            <h4>{value(speaker, "name")}</h4>
+            <p>{value(speaker, "role_name") || value(speaker, "presence_label")}</p>
+            {detail.dialogue_cn && <blockquote>{detail.dialogue_cn}</blockquote>}
+          </div>
+        </section>
       )}
       {detail.description_cn && <p className="long-copy">{detail.description_cn}</p>}
       {detail.text_cn && <p className="long-copy reading-copy">{detail.text_cn}</p>}
@@ -1082,7 +1098,7 @@ function ActionDetail({ detail, onClose }: { detail: ActionResult | null; onClos
           ))}
         </div>
       )}
-      {detail.dialogue_cn && <blockquote>{detail.dialogue_cn}</blockquote>}
+      {detail.dialogue_cn && !portrait && <blockquote>{detail.dialogue_cn}</blockquote>}
       {detail.discovered_evidence && detail.action === "search_container" && (
         <ul className="evidence-list">
           {detail.discovered_evidence.map((item) => (

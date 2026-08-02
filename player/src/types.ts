@@ -34,6 +34,7 @@ export type MapEntity = {
   religion_name?: string;
   guard_count?: number;
   historical_site_id?: string;
+  portrait_visual?: PersonVisualProfile;
   camp_id?: string;
   camp_state?: "occupied" | "embers" | "abandoned" | "weathered";
   owner_group_id?: string;
@@ -203,6 +204,7 @@ export type Informant = {
   claimed_origin_name: string;
   origin_knowledge_status: "unknown" | "self_reported" | "documented" | "corroborated";
   presence_label: string;
+  portrait_visual: PersonVisualProfile;
 };
 
 export type Journal = {
@@ -307,4 +309,19 @@ export type ItemVisualProfile = {
   condition: number;
   variant: number;
   damage: Array<"water" | "holes" | "charred" | "cracked" | "rust" | "torn" | "soil" | "faded">;
+};
+
+export type PersonVisualProfile = {
+  version: number;
+  seed: number;
+  skin_tone: number;
+  hair_color: number;
+  hair_style: "short" | "cropped" | "long" | "braided" | "wavy" | "balding";
+  face_shape: "round" | "oval" | "angular";
+  age_group: "young" | "adult" | "mature" | "elder";
+  outfit: "scholar" | "merchant" | "artisan" | "guard" | "laborer" | "official" | "cleric" | "traveler" | "common";
+  headwear: "none" | "cap" | "wrap" | "hood" | "hat" | "helmet";
+  expression: "calm" | "warm" | "focused" | "stern" | "weary";
+  detail: "none" | "freckles" | "scar" | "earring";
+  accent: number;
 };

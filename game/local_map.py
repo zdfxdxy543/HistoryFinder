@@ -7,6 +7,7 @@ import math
 from collections import deque
 from dataclasses import dataclass
 
+from game.person_visual import build_person_visual
 from simulation.names import generate_unique_name
 from simulation.person import public_mobility_status, public_travel_role
 from simulation.religion import primary_religion
@@ -386,9 +387,13 @@ class LocalMapEntity:
     book_count: int = 0
     library_total: int = 0
     blocks_movement: bool = True
+    portrait_visual: dict | None = None
 
     def to_dict(self) -> dict:
-        return dict(self.__dict__)
+        result = dict(self.__dict__)
+        if self.portrait_visual is None:
+            result.pop("portrait_visual")
+        return result
 
 
 @dataclass(frozen=True)
@@ -607,6 +612,10 @@ class LocalMapBuilder:
                 state=public_status,
                 zone=zone,
                 description_cn=description,
+                portrait_visual=build_person_visual(
+                    informant.id, informant.role,
+                    state=public_status,
+                    age=person.age_at(world.current_year)),
             ))
         if settlement.alive:
             entities.extend(self._residents(
@@ -1800,6 +1809,9 @@ class LocalMapBuilder:
                     f"一位住在{settlement.name}的{occupation[1]}。{occupation[2]}"),
                 dialogue_cn=DAILY_CHATTER[
                     (chatter_offset + index) % len(DAILY_CHATTER)],
+                portrait_visual=build_person_visual(
+                    f"resident_{settlement.id}_{index + 1:02d}",
+                    occupation[0], state="resident"),
             ))
         return residents
 
@@ -1834,6 +1846,10 @@ class LocalMapBuilder:
                 description_cn=(
                     f"一位在{settlement.name}毁灭后仍留在附近的幸存者。"),
                 dialogue_cn="我们在残墙外搭起住处，只在白天进入废墟寻找还能使用的东西。",
+                portrait_visual=build_person_visual(
+                    person.id,
+                    person.roles[0] if person.roles else "survivor",
+                    state="survivor", age=person.age_at(world.current_year)),
             ))
 
         generic_count = min(4, settlement.population // 8)
@@ -1863,6 +1879,9 @@ class LocalMapBuilder:
                 zone="废墟幸存者营地",
                 description_cn="一位住在废墟边缘临时营地中的幸存居民。",
                 dialogue_cn="多数人已经离开，留下的人轮流看守营地和辨认废墟中的旧物。",
+                portrait_visual=build_person_visual(
+                    f"ruin_survivor_{settlement.id}_{index + 1:02d}",
+                    "survivor", state="survivor"),
             ))
         return survivors
 

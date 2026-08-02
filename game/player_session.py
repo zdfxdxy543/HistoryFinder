@@ -20,6 +20,7 @@ from game.knowledge import PlayerKnowledge
 from game.item_visual import build_item_visual
 from game.local_map import build_evidence_targets
 from game.local_time import LocalTimeSimulation
+from game.person_visual import build_person_visual
 from game.world_cell_map import (
     LocalMapRepository,
     cell_key,
@@ -484,6 +485,7 @@ class PlayerSession:
                 "role_name": resident["role_name"],
                 "zone": resident["zone"],
                 "description_cn": resident["description_cn"],
+                "portrait_visual": resident.get("portrait_visual"),
             },
             "dialogue_cn": resident["dialogue_cn"],
         }, 5)
@@ -1051,6 +1053,10 @@ class PlayerSession:
             "claimed_origin_name": claimed_origin_name,
             "origin_knowledge_status": origin_knowledge_status,
             "presence_label": presence_label,
+            "portrait_visual": build_person_visual(
+                informant.id, informant.role,
+                state=public_status,
+                age=person.age_at(self.world.current_year)),
         }
 
     def _held_knowledge(self, informant) -> tuple[HeldKnowledgeView, ...]:
