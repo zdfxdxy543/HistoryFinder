@@ -11,6 +11,7 @@ const TILE_COLORS = [
   "#c5ad72", "#355f43", "#6f746d", "#7f8c52", "#8c7350",
   "#aeb5aa", "#526f61",
   "#55735a",
+  "#668b96",
 ];
 
 type Props = {
@@ -304,6 +305,18 @@ class SettlementScene extends Phaser.Scene {
         context.lineTo(px + post, py + 29);
       }
       context.stroke();
+    } else if (tile === 18) {
+      context.strokeStyle = "rgba(151, 196, 202, .7)";
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(px + 3, py + 9);
+      context.lineTo(px + 28, py + 9);
+      context.moveTo(px + 7, py + 23);
+      context.lineTo(px + 30, py + 23);
+      context.stroke();
+      for (const [stoneX, stoneY] of [[7, 17], [16, 11], [25, 18]]) {
+        this.fillCircle(context, px + stoneX, py + stoneY, 3, "#a6aaa0");
+      }
     }
   }
 
@@ -479,7 +492,16 @@ class SettlementScene extends Phaser.Scene {
       const shadow = this.add.ellipse(0, 11, 22, 8, 0x18201c, 0.28);
       const shape = this.add.graphics();
       if (entity.kind === "landmark") {
-        if (entity.subtype === "sacred_shrine") {
+        if (entity.subtype === "ferry") {
+          shape.fillStyle(0x76543a, 1);
+          shape.fillTriangle(-16, -4, 16, -4, 11, 10);
+          shape.fillTriangle(-16, -4, 11, 10, -11, 10);
+          shape.lineStyle(2, 0x3f3026, 1);
+          shape.lineBetween(-16, -4, 16, -4);
+          shape.lineBetween(-11, 4, 12, 4);
+          shape.lineStyle(2, 0xb59461, 1);
+          shape.lineBetween(9, -12, 14, 13);
+        } else if (entity.subtype === "sacred_shrine") {
           shape.fillStyle(0x77766d, 1);
           shape.fillRect(-12, 2, 24, 10);
           shape.fillStyle(0xa6a28f, 1);

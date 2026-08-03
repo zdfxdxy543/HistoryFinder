@@ -87,6 +87,8 @@ class PlayerSessionStore:
             if action == "inspect_wilderness":
                 return session.inspect_wilderness(
                     str(payload.get("entity_id", "")))
+            if action == "use_ferry":
+                return session.use_ferry(str(payload.get("entity_id", "")))
             if action == "search_container":
                 return session.search_container(
                     str(payload.get("container_id", "")))
@@ -95,6 +97,9 @@ class PlayerSessionStore:
                     str(payload.get("shelf_id", "")))
             if action == "read_library_book":
                 return session.read_library_book(
+                    str(payload.get("book_id", "")))
+            if action == "register_library_book":
+                return session.register_library_book(
                     str(payload.get("book_id", "")))
             if action == "move":
                 return session.move(

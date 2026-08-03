@@ -144,6 +144,8 @@ class PlayerKnowledge:
     discovered_evidence_ids: set[str] = field(default_factory=set)
     examined_evidence_ids: set[str] = field(default_factory=set)
     read_evidence_ids: set[str] = field(default_factory=set)
+    read_library_book_ids: set[str] = field(default_factory=set)
+    registered_library_book_ids: set[str] = field(default_factory=set)
     observations: dict[str, Observation] = field(default_factory=dict)
     document_readings: dict[str, DocumentReading] = field(
         default_factory=dict)
@@ -153,10 +155,18 @@ class PlayerKnowledge:
     source_groups: dict[str, SourceGroup] = field(default_factory=dict)
     conflicts: dict[str, ClaimConflict] = field(default_factory=dict)
     comparisons: dict[str, ComparisonResult] = field(default_factory=dict)
-    schema_version: int = 3
+    schema_version: int = 4
 
     def discover_evidence(self, evidence_id: str) -> None:
         self.discovered_evidence_ids.add(evidence_id)
+
+    def record_library_reading(self, book_id: str) -> None:
+        self.read_library_book_ids.add(book_id)
+
+    def register_library_document(self, book_id: str) -> bool:
+        before = len(self.registered_library_book_ids)
+        self.registered_library_book_ids.add(book_id)
+        return len(self.registered_library_book_ids) > before
 
     def record_observations(
             self, evidence_id: str,
@@ -570,6 +580,9 @@ class PlayerKnowledge:
             "discovered_evidence_ids": sorted(self.discovered_evidence_ids),
             "examined_evidence_ids": sorted(self.examined_evidence_ids),
             "read_evidence_ids": sorted(self.read_evidence_ids),
+            "read_library_book_ids": sorted(self.read_library_book_ids),
+            "registered_library_book_ids": sorted(
+                self.registered_library_book_ids),
             "observations": {
                 key: observation.to_dict()
                 for key, observation in self.observations.items()
@@ -612,6 +625,10 @@ class PlayerKnowledge:
             examined_evidence_ids=set(
                 data.get("examined_evidence_ids", [])),
             read_evidence_ids=set(data.get("read_evidence_ids", [])),
+            read_library_book_ids=set(data.get(
+                "read_library_book_ids", [])),
+            registered_library_book_ids=set(data.get(
+                "registered_library_book_ids", [])),
             observations={
                 key: Observation.from_dict(value)
                 for key, value in data.get("observations", {}).items()
@@ -644,7 +661,7 @@ class PlayerKnowledge:
                 key: ComparisonResult.from_dict(value)
                 for key, value in data.get("comparisons", {}).items()
             },
-            schema_version=max(3, int(data.get("schema_version", 1))),
+            schema_version=max(4, int(data.get("schema_version", 1))),
         )
         for statement in knowledge.source_statements.values():
             knowledge._register_source_group(statement)

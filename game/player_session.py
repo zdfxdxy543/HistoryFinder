@@ -18,7 +18,7 @@ from game.investigation import (
 )
 from game.knowledge import PlayerKnowledge
 from game.item_visual import build_item_visual
-from game.local_map import build_evidence_targets
+from game.local_map import TILE_FORD, build_evidence_targets
 from game.local_time import LocalTimeSimulation
 from game.person_visual import build_person_visual
 from game.world_cell_map import (
@@ -31,6 +31,7 @@ from simulation.person import (
     public_mobility_status,
     public_travel_role,
 )
+from simulation.documents import DocumentProfile, historical_damage_labels
 from simulation.territory import build_territory_payload
 from game.observation import build_evidence_observations
 from narrative.context_builder import build_evidence_context
@@ -296,10 +297,11 @@ class PlayerSession:
                 "book_count": len(books),
                 "condition": shelf["condition"],
             },
-            "library_books": [book.public_payload() for book in books],
+            "library_books": [
+                self._library_book_payload(book) for book in books],
             "description_cn": (
                 f"你按馆藏编号浏览了这组书架，共找到 {len(books)} 册书。"
-                "这些普通馆藏不会自动记作历史证据。"),
+                "馆藏不会自动成为历史证物，但阅读后可以登记为调查资料。"),
             "local_map": self.local_map,
         }, 10)
 
@@ -327,6 +329,7 @@ class PlayerSession:
             text = reading["front_matter"]
             status = "readable"
         if status == "readable":
+            self.knowledge.record_library_reading(book.id)
             front_matter = reading["front_matter"]
             sections = reading["sections"]
             readability_ratio = reading["readability_ratio"]
@@ -338,13 +341,32 @@ class PlayerSession:
             damage_labels = []
         return self._finish_action({
             "action": "read_library_book",
-            "library_book": {**book.public_payload(), "status": status},
+            "library_book": {
+                **self._library_book_payload(book), "status": status},
             "text_cn": front_matter,
             "library_sections": sections,
             "readability_ratio": readability_ratio,
             "damage_labels": damage_labels,
             "description_cn": f"你从{self.world.storage_sites[book.collection_id].name}取下{book.title}。",
         }, 20)
+
+    def register_library_book(self, book_id: str) -> dict:
+        book = self.world.library_books.get(book_id)
+        if book is None:
+            raise PlayerActionError("找不到这份馆藏文献。")
+        if book_id not in self.knowledge.read_library_book_ids:
+            raise PlayerActionError("需要先读过正文，才能登记为调查资料。")
+        added = self.knowledge.register_library_document(book_id)
+        return self._finish_action({
+            "action": "register_library_book",
+            "library_book": self._library_book_payload(book),
+            "registered": True,
+            "description_cn": (
+                f"{book.title}已登记为调查资料。"
+                if added else f"{book.title}已经在调查资料中。"
+            ),
+            "journal": self.journal_payload(),
+        }, 1)
 
     def read(self, evidence_id: str) -> dict:
         candidate = self.world.evidence.get(evidence_id)
@@ -389,6 +411,8 @@ class PlayerSession:
             "evidence": self._evidence_payload(evidence),
             "reading": reading.to_dict(),
             "text_cn": result.get("text", "没有可读取的内容。"),
+            "readability_ratio": result.get("readability"),
+            "damage_labels": historical_damage_labels(evidence),
             "learned_claims": [item.to_dict() for item in learned],
             "local_map": self.local_map,
             "journal": self.journal_payload(),
@@ -525,10 +549,45 @@ class PlayerSession:
             "dialogue_cn": entity.get("dialogue_cn", ""),
         }, 3)
 
+    def use_ferry(self, entity_id: str) -> dict:
+        ferry = next(
+            (item for item in self.local_map["entities"]
+             if item["id"] == entity_id
+             and item.get("subtype") == "ferry"),
+            None,
+        )
+        if ferry is None:
+            raise PlayerActionError("这里没有可以乘坐的渡船。")
+        position = (int(ferry["x"]), int(ferry["y"]))
+        player = self.local_time.player
+        if (abs(position[0] - player["x"])
+                + abs(position[1] - player["y"]) > 1):
+            raise PlayerActionError("需要走到渡口旁才能乘船。")
+        target_data = ferry.get("ferry_target", {})
+        target = (int(target_data.get("x", -1)),
+                  int(target_data.get("y", -1)))
+        if not self.local_time._is_walkable(target):
+            raise PlayerActionError("对岸泊位目前无法靠岸。")
+        self.local_time.player = {"x": target[0], "y": target[1]}
+        return self._finish_action({
+            "action": "use_ferry",
+            "moved": True,
+            "description_cn": "你乘平底渡船穿过干流，在十分钟后抵达对岸。",
+        }, 10)
+
     def move(self, dx: int, dy: int, movement_mode: str = "walk") -> dict:
         movement_minutes = {"walk": 1.0, "run": 0.5}.get(movement_mode)
         if movement_minutes is None:
             raise PlayerActionError("移动模式只能是行走或奔跑。")
+        target = (self.local_time.player["x"] + dx,
+                  self.local_time.player["y"] + dy)
+        if self.local_time._in_bounds(target):
+            width = self.local_map["width"]
+            target_tile = self.local_map["tiles"][target[1] * width + target[0]]
+            if target_tile == TILE_FORD:
+                if movement_mode == "run":
+                    raise PlayerActionError("浅滩水滑，只能步行涉水。")
+                movement_minutes = 2.0
         before_absolute_minute = self._absolute_local_minute()
         try:
             result = self.local_time.move_player(
@@ -632,6 +691,29 @@ class PlayerSession:
             for item in self.world.evidence.values()
             if item.id in self.knowledge.discovered_evidence_ids
         }
+        historical_documents = [
+            DocumentProfile.from_historical_evidence(
+                item,
+                registered=True,
+                read=item.id in self.knowledge.read_evidence_ids,
+            ).to_dict()
+            for item in self.world.evidence.values()
+            if item.id in self.knowledge.discovered_evidence_ids
+            and has_text_carrier(item)
+        ]
+        ordinary_documents = [
+            DocumentProfile.from_library_book(
+                self.world.library_books[book_id],
+                registered=True,
+                read=book_id in self.knowledge.read_library_book_ids,
+            ).to_dict()
+            for book_id in sorted(self.knowledge.registered_library_book_ids)
+            if book_id in self.world.library_books
+        ]
+        documents = sorted(
+            historical_documents + ordinary_documents,
+            key=lambda item: item["id"],
+        )
         return {
             "counts": {
                 "discovered": len(self.knowledge.discovered_evidence_ids),
@@ -643,8 +725,11 @@ class PlayerSession:
                 "conflicts": len(self.knowledge.conflicts),
                 "comparisons": len(self.knowledge.comparisons),
                 "source_groups": len(self.knowledge.source_groups),
+                "documents": len(documents),
+                "registered_holdings": len(ordinary_documents),
             },
             "evidence_names": evidence_names,
+            "documents": documents,
             "observations": [
                 item.to_dict() for item in sorted(
                     self.knowledge.observations.values(),
@@ -962,7 +1047,25 @@ class PlayerSession:
         payload["read"] = evidence.id in self.knowledge.read_evidence_ids
         payload["source_group_ids"] = list(
             self._source_groups_for_evidence(evidence.id))
+        if has_text_carrier(evidence):
+            payload["document"] = DocumentProfile.from_historical_evidence(
+                evidence,
+                registered=True,
+                read=evidence.id in self.knowledge.read_evidence_ids,
+            ).to_dict()
+            payload["damage_labels"] = historical_damage_labels(evidence)
         return payload
+
+    def _library_book_payload(self, book) -> dict:
+        registered = book.id in self.knowledge.registered_library_book_ids
+        read = book.id in self.knowledge.read_library_book_ids
+        return {
+            **book.public_payload(),
+            "document": DocumentProfile.from_library_book(
+                book, registered=registered, read=read).to_dict(),
+            "registered": registered,
+            "read": read,
+        }
 
     def _sync_discovered_evidence(self) -> None:
         self.local_map["discovered_evidence"] = [

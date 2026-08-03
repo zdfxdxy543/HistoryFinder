@@ -305,11 +305,15 @@ button { color: inherit; }
 .catalog-filters input { min-width: 0; width: 100%; height: 34px; padding: 5px 0; border: 0; outline: 0; background: transparent; }
 .catalog-filters select { min-width: 0; height: 36px; padding: 5px 7px; color: var(--ink); background: #fff; border: 1px solid #aeb8b0; }
 .library-book-list { max-height: 310px; overflow-y: auto; }
-.library-book-row { min-height: 56px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 8px 20px; border-bottom: 1px solid #e3e8e3; }
+.library-book-row { min-height: 56px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto auto; align-items: center; gap: 9px; padding: 8px 20px; border-bottom: 1px solid #e3e8e3; }
 .library-book-row > svg { color: var(--ochre); }
 .library-book-row strong, .library-book-row small { display: block; overflow-wrap: anywhere; }
 .library-book-row small { margin-top: 3px; color: var(--muted); font-size: 10px; }
 .library-book-row .command-button { min-height: 30px; padding: 4px 8px; }
+@media (max-width: 430px) {
+  .library-book-row { grid-template-columns: 18px minmax(0, 1fr) auto; }
+  .library-book-row .nearby-mark { grid-column: 2; }
+}
 
 .compare-strip { display: grid; grid-template-columns: minmax(0, 1fr) 34px; align-items: center; gap: 10px; padding: 10px 20px; background: #e9f0f3; border-bottom: 1px solid #c6d7df; }
 .compare-summary { min-width: 0; }
@@ -340,6 +344,9 @@ button { color: inherit; }
 .reading-copy { padding-left: 12px; border-left: 3px solid var(--ochre); }
 .book-condition { display: flex; flex-wrap: wrap; gap: 6px; margin: 11px 0 2px; }
 .book-condition span { padding: 3px 7px; color: #654d25; background: #f4ead6; border: 1px solid #dfc99f; font-size: 10px; font-weight: 700; }
+.document-registration { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding: 8px 10px; background: #edf3ee; border: 1px solid #cad8cd; }
+.document-registration > span { color: var(--green); font-size: 10px; font-weight: 800; }
+.document-entry > span { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
 .book-sections { display: grid; gap: 14px; margin-top: 16px; }
 .book-sections section { padding-top: 12px; border-top: 1px solid var(--line); }
 .book-sections section.damaged { border-top-color: #d5b97c; }

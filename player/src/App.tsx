@@ -30,6 +30,7 @@ import {
   RefreshCw,
   Scale,
   Search,
+  Ship,
   Snowflake,
   Sun,
   Terminal,
@@ -189,6 +190,11 @@ export default function App() {
         if (result.journal) setJournal(result.journal);
         if (result.runtime) setRuntime(result.runtime);
         if (result.library_books) setLibraryBooks(result.library_books);
+        if (result.library_book) {
+          setLibraryBooks((current) => current.map((book) => (
+            book.id === result.library_book!.id ? result.library_book! : book
+          )));
+        }
         if (result.local_map) {
           setState((current) => current ? {
             ...current,
@@ -605,9 +611,11 @@ export default function App() {
                 onSearch={(id) => void runAction({ action: "search_container", container_id: id })}
                 onBrowseBookshelf={(id) => void runAction({ action: "browse_bookshelf", shelf_id: id })}
                 onReadLibraryBook={(id) => void runAction({ action: "read_library_book", book_id: id })}
+                onRegisterLibraryBook={(id) => void runAction({ action: "register_library_book", book_id: id })}
                 onExamine={(id) => void runAction({ action: "examine", evidence_id: id })}
                 onRead={(id) => void runAction({ action: "read", evidence_id: id })}
                 onInspectWilderness={(id) => void runAction({ action: "inspect_wilderness", entity_id: id })}
+                onUseFerry={(id) => void runAction({ action: "use_ferry", entity_id: id })}
                 onToggleCompare={addToCompare}
                 onCompare={() => void compare()}
                 onClearDetail={() => setDetail(null)}
@@ -790,9 +798,11 @@ function InspectPanel(props: {
   onSearch: (id: string) => void;
   onBrowseBookshelf: (id: string) => void;
   onReadLibraryBook: (id: string) => void;
+  onRegisterLibraryBook: (id: string) => void;
   onExamine: (id: string) => void;
   onRead: (id: string) => void;
   onInspectWilderness: (id: string) => void;
+  onUseFerry: (id: string) => void;
   onToggleCompare: (id: string) => void;
   onCompare: () => void;
   onClearDetail: () => void;
@@ -865,6 +875,11 @@ function InspectPanel(props: {
               : selected.kind === "traveler" ? "与行人交谈"
               : selected.kind === "wildlife" ? "观察动物" : "查看此处"}
           </button>
+          {selected.subtype === "ferry" && (
+            <button className="command-button" disabled={!props.nearby || props.busy} onClick={() => props.onUseFerry(selected.id)}>
+              <Ship size={15} /> 乘船到对岸
+            </button>
+          )}
         </div>
       )}
       {selected?.kind === "evidence" && (
@@ -912,6 +927,7 @@ function InspectPanel(props: {
                   <strong>{book.title}</strong>
                   <small>{book.genre_name} · {book.author_name} · 第 {book.catalog_number} 号</small>
                 </span>
+                {book.registered && <span className="nearby-mark">调查资料</span>}
                 <button className="command-button" disabled={props.busy} onClick={() => props.onReadLibraryBook(book.id)}>阅读</button>
               </div>
             ))}
@@ -985,7 +1001,11 @@ function InspectPanel(props: {
         </section>
       )}
 
-      <ActionDetail detail={detail} onClose={props.onClearDetail} />
+      <ActionDetail
+        detail={detail}
+        onClose={props.onClearDetail}
+        onRegisterLibraryBook={props.onRegisterLibraryBook}
+      />
     </>
   );
 }
@@ -1104,7 +1124,11 @@ function PeoplePanel(props: {
   );
 }
 
-function ActionDetail({ detail, onClose }: { detail: ActionResult | null; onClose?: () => void }) {
+function ActionDetail({ detail, onClose, onRegisterLibraryBook }: {
+  detail: ActionResult | null;
+  onClose?: () => void;
+  onRegisterLibraryBook?: (id: string) => void;
+}) {
   if (!detail) {
     return (
       <section className="empty-detail">
@@ -1140,12 +1164,26 @@ function ActionDetail({ detail, onClose }: { detail: ActionResult | null; onClos
       )}
       {detail.description_cn && <p className="long-copy">{detail.description_cn}</p>}
       {detail.text_cn && <p className="long-copy reading-copy">{detail.text_cn}</p>}
-      {detail.action === "read_library_book" && detail.readability_ratio != null && (
+      {["read", "read_library_book"].includes(detail.action) && detail.readability_ratio != null && (
         <div className="book-condition" role="status">
           <span>可读内容 {Math.round(detail.readability_ratio * 100)}%</span>
           {detail.damage_labels?.map((label) => <span key={label}>{label}</span>)}
         </div>
       )}
+      {detail.action === "read_library_book"
+        && detail.library_book?.status === "readable"
+        && onRegisterLibraryBook && (
+          <div className="document-registration">
+            <span>{detail.library_book.registered ? "已登记为调查资料" : "普通馆藏 · 尚未登记"}</span>
+            <button
+              className="command-button primary"
+              disabled={detail.library_book.registered}
+              onClick={() => onRegisterLibraryBook(detail.library_book!.id)}
+            >
+              <FileText size={14} /> {detail.library_book.registered ? "已登记" : "登记为调查资料"}
+            </button>
+          </div>
+        )}
       {detail.library_sections && (
         <div className="book-sections">
           {detail.library_sections.map((section, index) => (
@@ -1232,7 +1270,24 @@ function JournalEntries({ journal, tab }: { journal: Journal; tab: JournalTab })
     return <Entries items={journal.observations} render={(item) => <><small>{journal.evidence_names[value(item, "evidence_id")] ?? "证物"}</small><p>{value(item, "description_cn")}</p></>} />;
   }
   if (tab === "texts") {
-    return <Entries items={journal.readings} render={(item) => <><small>{journal.evidence_names[value(item, "evidence_id")] ?? "文书"}</small>{list(item, "visible_passages").map((line, index) => <blockquote key={index}>{String(line)}</blockquote>)}</>} />;
+    if (!journal.documents.length) {
+      return <div className="empty-detail"><BookOpen size={23} /><p>这一栏还没有登记文献。</p></div>;
+    }
+    return <>{journal.documents.map((document) => {
+      const reading = journal.readings.find(
+        (item) => value(item, "evidence_id") === document.id,
+      );
+      return (
+        <article className="journal-entry document-entry" key={document.id}>
+          <small>{document.document_kind === "historical_source" ? "历史文献" : "普通馆藏"} · {document.date_label}</small>
+          <p><strong>{document.title}</strong></p>
+          <span>{document.author_name} · {document.form} · {document.read ? "已读" : "未读"}</span>
+          {reading && list(reading, "visible_passages").map(
+            (line, index) => <blockquote key={index}>{String(line)}</blockquote>,
+          )}
+        </article>
+      );
+    })}</>;
   }
   if (tab === "statements") {
     return <Entries items={journal.statements} render={(item) => <><small>{value(item, "speaker_type")}</small><p>{value(item, "statement_cn")}</p></>} />;
@@ -1266,7 +1321,7 @@ function Confidence({ components }: { components: Record<string, number> }) {
 function journalCount(journal: Journal, tab: JournalTab) {
   const map: Record<JournalTab, number> = {
     observations: journal.counts.observations,
-    texts: journal.counts.read,
+    texts: journal.counts.documents,
     statements: journal.counts.statements,
     claims: journal.counts.claims,
     conflicts: journal.counts.conflicts,
@@ -1275,7 +1330,7 @@ function journalCount(journal: Journal, tab: JournalTab) {
 }
 
 function actionTitle(action: string) {
-  return { examine: "客观检查", read: "文书阅读", browse_bookshelf: "馆藏目录", read_library_book: "馆藏阅读", consult: "咨询记录", compare: "证物比较", talk: "街头闲谈", inspect_wilderness: "荒野见闻" }[action] ?? "调查结果";
+  return { examine: "客观检查", read: "文书阅读", browse_bookshelf: "馆藏目录", read_library_book: "馆藏阅读", register_library_book: "资料登记", consult: "咨询记录", compare: "证物比较", talk: "街头闲谈", inspect_wilderness: "荒野见闻", use_ferry: "渡河记录" }[action] ?? "调查结果";
 }
 
 function move(dx: number, dy: number) {

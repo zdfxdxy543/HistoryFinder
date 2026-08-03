@@ -185,6 +185,31 @@ class Signpost:
             self.abandoned_year = None
             self.revision += 1
 
+    def displayed_boards(
+            self, active_route_ids: set[str] | None = None
+            ) -> list[SignBoard]:
+        """Return one visible board per destination, preferring a live shortcut."""
+        active_route_ids = active_route_ids or set()
+        original_by_id = {item.id: item for item in self.original_boards}
+
+        def rank(board: SignBoard) -> tuple[int, int, str]:
+            original = original_by_id.get(board.id, board)
+            try:
+                distance = int(original.displayed_distance)
+            except ValueError:
+                distance = 10 ** 9
+            inactive = int(bool(active_route_ids)
+                           and board.source_route_id not in active_route_ids)
+            return inactive, distance, board.id
+
+        selected: dict[str, SignBoard] = {}
+        for board in self.current_boards:
+            previous = selected.get(board.destination_id)
+            if previous is None or rank(board) < rank(previous):
+                selected[board.destination_id] = board
+        selected_ids = {item.id for item in selected.values()}
+        return [item for item in self.current_boards if item.id in selected_ids]
+
     def weather_to(self, year: int, seed: int) -> None:
         age = max(0, year - self.built_year)
         wear = "heavy" if age >= 24 else "moderate" if age >= 9 else "light"

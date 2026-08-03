@@ -18,6 +18,7 @@ from game.local_map import (
     TILE_FOREST,
     TILE_FLOOR,
     TILE_FENCE,
+    TILE_FORD,
     TILE_GRASS,
     TILE_MARSH,
     TILE_ROAD,
@@ -28,6 +29,7 @@ from game.local_map import (
     TILE_WATER,
     TILE_WALL,
     build_evidence_targets,
+    line_box_endpoints,
     paint_watercourse,
 )
 
@@ -193,6 +195,7 @@ class WorldCellMapBuilder:
         base = BIOME_BASE_TILE.get(biome, TILE_GRASS)
         tiles = [base] * (width * height)
         roads: set[tuple[int, int]] = set()
+        river_crossing_entities: list[dict] = []
         if biome not in {"ocean", "lake"}:
             self._paint_land(tiles, world.seed, x, y, biome, width, height)
             self._paint_boundary_transitions(
@@ -203,8 +206,22 @@ class WorldCellMapBuilder:
         site_buildings, site_zones, site_entities, site_reserved = \
             self._paint_historical_sites(
                 world, x, y, tiles, roads, width, height)
+        if biome == "river" and TILE_BRIDGE not in tiles:
+            crossing = self._river_crossing(
+                tiles, geography, x, y, width, height)
+            if crossing is not None:
+                water_path, first_bank, second_bank = crossing
+                if geography.river_radius(x, y) <= 2:
+                    for px, py in water_path:
+                        tiles[py * width + px] = TILE_FORD
+                else:
+                    river_crossing_entities = self._ferry_entities(
+                        x, y, first_bank, second_bank)
+        crossing_reserved = site_reserved | {
+            (item["x"], item["y"]) for item in river_crossing_entities}
         entities = self._wilderness_entities(
-            world, x, y, tiles, roads, width, height, site_reserved)
+            world, x, y, tiles, roads, width, height, crossing_reserved)
+        entities.extend(river_crossing_entities)
         entities.extend(site_entities)
         entities.extend(self._wilderness_evidence_entities(
             world, x, y, tiles, site_reserved, site_buildings, entities,
@@ -243,6 +260,8 @@ class WorldCellMapBuilder:
                 "layout_name": "野外",
                 "water_axis": "none",
                 "water_side": "none",
+                "water_radius": (
+                    geography.river_radius(x, y) if biome == "river" else 0),
                 "hub": {"x": width // 2, "y": height // 2},
                 "entrances": ["north", "south", "east", "west"],
                 "landscape_type": biome,
@@ -662,10 +681,17 @@ class WorldCellMapBuilder:
             direction_names = {
                 "north": "北", "east": "东", "south": "南", "west": "西",
             }
+            active_route_ids = {
+                route_id for route_id in signpost.route_ids
+                if (route := world.trade_routes.get(route_id)) is not None
+                and route.status == "active"
+            }
+            displayed_boards = signpost.displayed_boards(active_route_ids)
+            displayed_board_ids = {board.id for board in displayed_boards}
             directions = [
                 f"向{direction_names.get(board.direction, board.direction)}："
                 f"{board.displayed_name}约{board.displayed_distance}格"
-                for board in signpost.current_boards
+                for board in displayed_boards
             ]
             wear_data = {
                 "light": ("轻度磨损", "牌面边缘被风沙磨圆，刻痕仍然清楚。"),
@@ -731,9 +757,10 @@ class WorldCellMapBuilder:
                         if repair else "无修补错误"),
                     "abandoned_year": signpost.abandoned_year,
                     "original_boards": [
-                        board.to_dict() for board in signpost.original_boards],
+                        board.to_dict() for board in signpost.original_boards
+                        if board.id in displayed_board_ids],
                     "current_boards": [
-                        board.to_dict() for board in signpost.current_boards],
+                        board.to_dict() for board in displayed_boards],
                     "repair_history": [
                         item.to_dict() for item in signpost.repair_history],
                 },
@@ -1198,30 +1225,157 @@ class WorldCellMapBuilder:
             return
         center = (width // 2, height // 2)
         portals = []
+        current_radius = geography.river_radius(x, y)
         for dx, dy in geography.river_connections(x, y):
             nx, ny = x + dx, y + dy
             offset = _edge_fraction("river", (x, y), (nx, ny))
             if dx == 0 and dy < 0:
-                portals.append((round(offset * (width - 1)), 0))
+                portal = (round(offset * (width - 1)), 0)
             elif dx == 0 and dy > 0:
-                portals.append((round(offset * (width - 1)), height - 1))
+                portal = (round(offset * (width - 1)), height - 1)
             elif dx < 0 and dy == 0:
-                portals.append((0, round(offset * (height - 1))))
+                portal = (0, round(offset * (height - 1)))
             elif dx > 0 and dy == 0:
-                portals.append((width - 1, round(offset * (height - 1))))
+                portal = (width - 1, round(offset * (height - 1)))
             elif dx < 0 and dy < 0:
-                portals.append((0, 0))
+                portal = (0, 0)
             elif dx > 0 and dy < 0:
-                portals.append((width - 1, 0))
+                portal = (width - 1, 0)
             elif dx < 0 and dy > 0:
-                portals.append((0, height - 1))
+                portal = (0, height - 1)
             else:
-                portals.append((width - 1, height - 1))
+                portal = (width - 1, height - 1)
+            portals.append((portal, max(
+                current_radius, geography.river_radius(nx, ny))))
         if not portals:
-            portals = [(width // 2, 0), (width // 2, height - 1)]
-        for portal in dict.fromkeys(portals):
+            portals = [((width // 2, 0), current_radius),
+                       ((width // 2, height - 1), current_radius)]
+        portal_radii: dict[tuple[int, int], int] = {}
+        for portal, radius in portals:
+            portal_radii[portal] = max(portal_radii.get(portal, 0), radius)
+        for portal, radius in portal_radii.items():
             paint_watercourse(
-                tiles, width, height, (portal, center), radius=1)
+                tiles, width, height, (portal, center),
+                radius=radius)
+
+    def _river_crossing(self, tiles, geography, x, y, width, height):
+        connections = geography.river_connections(x, y)
+        if len(connections) >= 2:
+            first, second = max(
+                ((first, second)
+                 for index, first in enumerate(connections)
+                 for second in connections[index + 1:]),
+                key=lambda pair: (
+                    (pair[1][0] - pair[0][0]) ** 2
+                    + (pair[1][1] - pair[0][1]) ** 2),
+            )
+            tangent = (second[0] - first[0], second[1] - first[1])
+        elif connections:
+            tangent = connections[0]
+        else:
+            tangent = (0, 1)
+        normal = (-tangent[1], tangent[0])
+        if normal == (0, 0):
+            normal = (1, 0)
+        tangent_length = max(1.0, math.hypot(*tangent))
+        tangent_unit = (
+            tangent[0] / tangent_length, tangent[1] / tangent_length)
+        scale = min(width, height)
+        for fraction in (0.0, -0.18, 0.18, -0.32, 0.32):
+            center = (
+                width / 2 + tangent_unit[0] * scale * fraction,
+                height / 2 + tangent_unit[1] * scale * fraction,
+            )
+            start, end = line_box_endpoints(
+                center, normal, width, height, inset=2)
+            path = self._cardinal_line(start, end)
+            water_indices = [
+                index for index, (px, py) in enumerate(path)
+                if tiles[py * width + px] == TILE_WATER
+            ]
+            if not water_indices:
+                continue
+            runs: list[list[int]] = []
+            for index in water_indices:
+                if not runs or index != runs[-1][-1] + 1:
+                    runs.append([index])
+                else:
+                    runs[-1].append(index)
+            center_index = min(
+                range(len(path)),
+                key=lambda index: (
+                    abs(path[index][0] - center[0])
+                    + abs(path[index][1] - center[1])),
+            )
+            for run in sorted(runs, key=lambda item: min(
+                    abs(index - center_index) for index in item)):
+                if run[0] == 0 or run[-1] == len(path) - 1:
+                    continue
+                first_bank = path[run[0] - 1]
+                second_bank = path[run[-1] + 1]
+                if (tiles[first_bank[1] * width + first_bank[0]]
+                        in BLOCKING_TILES
+                        or tiles[second_bank[1] * width + second_bank[0]]
+                        in BLOCKING_TILES):
+                    continue
+                return ([path[index] for index in run],
+                        first_bank, second_bank)
+        return None
+
+    @staticmethod
+    def _cardinal_line(start: tuple[int, int], end: tuple[int, int]
+                       ) -> list[tuple[int, int]]:
+        x, y = start
+        target_x, target_y = end
+        result = [(x, y)]
+        total_dx = target_x - x
+        total_dy = target_y - y
+        step_x = 1 if total_dx > 0 else -1
+        step_y = 1 if total_dy > 0 else -1
+        while (x, y) != (target_x, target_y):
+            candidates = []
+            if x != target_x:
+                next_x = x + step_x
+                error = abs(
+                    (next_x - start[0]) * total_dy
+                    - (y - start[1]) * total_dx)
+                candidates.append((error, 0, next_x, y))
+            if y != target_y:
+                next_y = y + step_y
+                error = abs(
+                    (x - start[0]) * total_dy
+                    - (next_y - start[1]) * total_dx)
+                candidates.append((error, 1, x, next_y))
+            _, _, x, y = min(candidates)
+            result.append((x, y))
+        return result
+
+    @staticmethod
+    def _ferry_entities(x: int, y: int, first_bank: tuple[int, int],
+                        second_bank: tuple[int, int]) -> list[dict]:
+        pair_id = f"ferry_{x}_{y}"
+        result = []
+        for side, position, target in (
+                ("a", first_bank, second_bank),
+                ("b", second_bank, first_bank)):
+            result.append(_wilderness_entity(
+                entity_id=f"{pair_id}_{side}",
+                kind="landmark",
+                subtype="ferry",
+                position=position,
+                name="河岸渡船",
+                role="river_crossing",
+                role_name="渡口",
+                zone="干流河岸",
+                description="一条平底木船系在岸桩旁，可将旅人送到对岸。",
+                dialogue="船身吃水很浅，往返一次大约需要十分钟。",
+                extra={
+                    "blocks_movement": False,
+                    "ferry_id": pair_id,
+                    "ferry_target": {"x": target[0], "y": target[1]},
+                },
+            ))
+        return result
 
     @staticmethod
     def _nearest_walkable(tiles, width, height, start):
@@ -1755,7 +1909,7 @@ def _paint_road(tiles, width, height, x, y, roads,
         else:
             tiles[index] = (
                 TILE_BRIDGE
-                if tiles[index] in {TILE_WATER, TILE_BRIDGE}
+                if tiles[index] in {TILE_WATER, TILE_BRIDGE, TILE_FORD}
                 else TILE_ROAD
             )
         roads.add((px, y))

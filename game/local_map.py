@@ -32,6 +32,7 @@ TILE_BRIDGE = 14
 TILE_TUNDRA = 15
 TILE_MARSH = 16
 TILE_FENCE = 17
+TILE_FORD = 18
 
 BLOCKING_TILES = {
     TILE_WALL, TILE_WATER, TILE_RUBBLE, TILE_SHELF, TILE_STALL,
@@ -345,6 +346,7 @@ class SettlementMapProfile:
     landscape_name: str
     feature_names: tuple[str, ...]
     watercourse: tuple[tuple[int, int], ...]
+    water_radius: int = 1
 
     def to_dict(self) -> dict:
         return {
@@ -359,6 +361,7 @@ class SettlementMapProfile:
             "feature_names": list(self.feature_names),
             "watercourse": [
                 {"x": x, "y": y} for x, y in self.watercourse],
+            "water_radius": self.water_radius,
         }
 
 
@@ -817,8 +820,10 @@ class LocalMapBuilder:
             water_side = "south" if nearest[1] > 0 else "north"
         nearest_distance = abs(nearest[0]) + abs(nearest[1])
         watercourse: tuple[tuple[int, int], ...] = ()
+        water_radius = 1
         if nearest[2] == "river" and nearest_distance <= 1:
             river_x, river_y = sx + nearest[0], sy + nearest[1]
+            water_radius = geography.river_radius(river_x, river_y)
             river_vector = self._river_vector(
                 geography.river_connections(river_x, river_y), river)
             if river_vector[1] == 0:
@@ -895,7 +900,7 @@ class LocalMapBuilder:
         return SettlementMapProfile(
             width, height, layout, water_axis, water_side,
             (hub_x, hub_y), entrances, base_tile, landscape,
-            landscape_name, feature_names, watercourse)
+            landscape_name, feature_names, watercourse, water_radius)
 
     @staticmethod
     def _river_vector(connections: tuple[tuple[int, int], ...],
@@ -984,7 +989,8 @@ class LocalMapBuilder:
                 round((start[1] + end[1]) / 2 + tangent_x / length * bend),
             )
             paint_watercourse(
-                tiles, width, height, (start, midpoint, end), radius=1)
+                tiles, width, height, (start, midpoint, end),
+                radius=profile.water_radius)
         elif profile.layout_type == "harbor":
             depth = max(7, min(width, height) // 8)
             for y in range(height):
@@ -1287,7 +1293,7 @@ class LocalMapBuilder:
             index = py * profile.width + px
             tiles[index] = (
                 TILE_BRIDGE
-                if tiles[index] in {TILE_WATER, TILE_BRIDGE}
+                if tiles[index] in {TILE_WATER, TILE_BRIDGE, TILE_FORD}
                 else TILE_ROAD
             )
             roads.add((px, py))

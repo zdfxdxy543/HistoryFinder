@@ -47,6 +47,8 @@ export type MapEntity = {
   repair_name?: string;
   repair_error_type?: "none" | "misspelling" | "distance_error" | "missing_character" | "illegible_text" | "illegible_distance";
   repair_error_name?: string;
+  ferry_id?: string;
+  ferry_target?: { x: number; y: number };
 };
 
 export type MapDecoration = {
@@ -81,6 +83,7 @@ export type LocalMap = {
     layout_name: string;
     water_axis: string;
     water_side: string;
+    water_radius?: number;
     hub: { x: number; y: number };
     entrances: string[];
     landscape_type: string;
@@ -216,6 +219,23 @@ export type Journal = {
   claims: Array<Record<string, unknown>>;
   conflicts: Array<Record<string, unknown>>;
   comparisons: Array<Record<string, unknown>>;
+  documents: DocumentProfile[];
+};
+
+export type DocumentProfile = {
+  schema_version: number;
+  id: string;
+  document_kind: "ordinary_holding" | "historical_source";
+  title: string;
+  author_name: string;
+  date_label: string;
+  origin_name: string;
+  language_code: string;
+  form: string;
+  material: string;
+  condition: string;
+  registered: boolean;
+  read: boolean;
 };
 
 export type LibraryBook = {
@@ -234,6 +254,9 @@ export type LibraryBook = {
   audience: string;
   length_class: "short" | "single_volume" | "multi_volume" | "";
   status?: "readable" | "unknown_language";
+  registered?: boolean;
+  read?: boolean;
+  document?: DocumentProfile;
 };
 
 export type PlayerState = {
@@ -277,6 +300,7 @@ export type ActionResult = {
   minutes?: number;
   elapsed_minutes?: number;
   movement_mode?: "walk" | "run";
+  registered?: boolean;
   location?: Pick<PlayerState, "settlement" | "local_map" | "runtime" | "informants">;
   world_map?: WorldMapState;
   origin?: { id: string; name: string };

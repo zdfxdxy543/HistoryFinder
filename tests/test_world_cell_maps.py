@@ -9,6 +9,7 @@ import pytest
 from game.local_map import (
     BLOCKING_TILES,
     TILE_BRIDGE,
+    TILE_FORD,
     TILE_GRASS,
     TILE_ROAD,
     TILE_WATER,
@@ -261,6 +262,45 @@ def test_duplicate_trade_route_path_reuses_physical_road_segments():
     assert after_portals == before_portals
     assert all(duplicate.id in world.road_segments[item].route_ids
                for item in duplicate.segment_ids)
+
+
+def test_shared_route_signpost_displays_each_destination_once():
+    world = World(seed=439)
+    world.generate(years=0)
+    first, second, route = _overland_route(world)
+    duplicate = TradeRoute(
+        id="route_duplicate_signpost_test",
+        settlement_a_id=second.id,
+        settlement_b_id=first.id,
+        opened_year=world.current_year,
+        path=list(reversed(route.path)),
+    )
+    world.trade_routes[duplicate.id] = duplicate
+    world._attach_route_segments(duplicate)
+    world._ensure_route_signposts(duplicate)
+    signpost = world.signposts[
+        f"signpost_{route.path[1][0]}_{route.path[1][1]}"]
+
+    duplicate_board = next(
+        item for item in signpost.current_boards
+        if item.source_route_id == duplicate.id
+        and item.destination_id == first.id)
+    next(item for item in signpost.original_boards
+         if item.id == duplicate_board.id).displayed_distance = "99"
+    duplicate_board.displayed_distance = "99"
+
+    local_map = WorldCellMapBuilder().build(world, *signpost.world_cell)
+    projected = next(
+        item for item in local_map["entities"] if item["id"] == signpost.id)
+
+    assert len(signpost.current_boards) == 4
+    assert projected["dialogue_cn"].count(first.name) == 1
+    assert projected["dialogue_cn"].count(second.name) == 1
+    assert len(projected["current_boards"]) == 2
+    first_board = next(
+        item for item in projected["current_boards"]
+        if item["destination_id"] == first.id)
+    assert first_board["source_route_id"] == route.id
 
 
 def test_inactive_trade_route_and_road_have_persistent_lifecycle():
@@ -729,6 +769,99 @@ def test_diagonal_river_connections_use_matching_map_corners():
     assert first_tiles[first_corner[1] * width + first_corner[0]] == TILE_WATER
     assert second_tiles[
         second_corner[1] * width + second_corner[0]] == TILE_WATER
+
+
+def test_wilderness_river_widths_create_fords_and_reciprocal_ferries():
+    world = World(seed=439)
+    world.generate(years=0)
+    builder = WorldCellMapBuilder()
+    maps_by_radius = {}
+    cells_by_radius = {}
+    for y in range(world.geography.height):
+        for x in range(world.geography.width):
+            if str(world.geography.biomes[y, x]) != "river":
+                continue
+            radius = world.geography.river_radius(x, y)
+            if radius in maps_by_radius:
+                continue
+            local_map = builder.build(world, x, y)
+            if TILE_BRIDGE in local_map["tiles"]:
+                continue
+            if radius <= 2 and TILE_FORD not in local_map["tiles"]:
+                continue
+            if (radius == 3 and len([
+                    item for item in local_map["entities"]
+                    if item.get("subtype") == "ferry"]) != 2):
+                continue
+            maps_by_radius[radius] = local_map
+            cells_by_radius[radius] = (x, y)
+        if set(maps_by_radius) == {1, 2, 3}:
+            break
+
+    assert set(maps_by_radius) == {1, 2, 3}
+    assert TILE_FORD not in BLOCKING_TILES
+    assert maps_by_radius[1]["profile"]["water_radius"] == 1
+    assert maps_by_radius[2]["profile"]["water_radius"] == 2
+    assert maps_by_radius[3]["profile"]["water_radius"] == 3
+
+    narrow_map = maps_by_radius[1]
+    ford_tiles = {
+        (index % narrow_map["width"], index // narrow_map["width"])
+        for index, tile in enumerate(narrow_map["tiles"])
+        if tile == TILE_FORD
+    }
+    start, ford = next(
+        ((x, y), (x + dx, y + dy))
+        for x, y in ford_tiles
+        for dx, dy in ((0, -1), (-1, 0), (1, 0), (0, 1))
+        if (x + dx, y + dy) in ford_tiles)
+    land_neighbors = {
+        (x + dx, y + dy)
+        for x, y in ford_tiles
+        for dx, dy in ((0, -1), (-1, 0), (1, 0), (0, 1))
+        if 0 <= x + dx < narrow_map["width"]
+        and 0 <= y + dy < narrow_map["height"]
+        and narrow_map["tiles"][
+            (y + dy) * narrow_map["width"] + x + dx
+        ] not in BLOCKING_TILES | {TILE_FORD}
+    }
+    assert len(land_neighbors) >= 2
+    session = PlayerSession(world)
+    session.current_cell = cells_by_radius[1]
+    session.current_location_id = None
+    session.local_map = narrow_map
+    session.local_time = LocalTimeSimulation(
+        narrow_map, world_seed=world.seed,
+        location_id=f"{session.current_cell[0]},{session.current_cell[1]}",
+        biome="river", player_position=start)
+    dx, dy = ford[0] - start[0], ford[1] - start[1]
+
+    with pytest.raises(PlayerActionError, match="只能步行涉水"):
+        session.move(dx, dy, movement_mode="run")
+    crossing = session.move(dx, dy, movement_mode="walk")
+
+    assert crossing["moved"]
+    assert crossing["elapsed_minutes"] == 2.0
+    assert session.local_time.player == {"x": ford[0], "y": ford[1]}
+
+    wide_map = maps_by_radius[3]
+    ferries = [
+        item for item in wide_map["entities"]
+        if item.get("subtype") == "ferry"]
+    first, second = ferries
+    assert first["ferry_target"] == {"x": second["x"], "y": second["y"]}
+    assert second["ferry_target"] == {"x": first["x"], "y": first["y"]}
+    session.current_cell = cells_by_radius[3]
+    session.local_map = wide_map
+    session.local_time = LocalTimeSimulation(
+        wide_map, world_seed=world.seed,
+        location_id=f"{session.current_cell[0]},{session.current_cell[1]}",
+        biome="river", player_position=(first["x"], first["y"]))
+
+    ferry_result = session.use_ferry(first["id"])
+
+    assert ferry_result["elapsed_minutes"] == 10
+    assert session.local_time.player == {"x": second["x"], "y": second["y"]}
 
 
 def test_watercourse_rasterizes_a_diagonal_instead_of_an_l_shape():

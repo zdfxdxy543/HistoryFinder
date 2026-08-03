@@ -4,6 +4,8 @@ import json
 from collections import deque
 
 from game.player_session import PlayerSession
+from game.knowledge import PlayerKnowledge
+from simulation.documents import DocumentProfile
 from simulation.library import (
     LibraryBook,
     build_library_catalog,
@@ -200,3 +202,66 @@ def test_book_damage_is_deterministic_monotonic_and_keeps_pristine_text():
         books["fragile"].to_dict(), ensure_ascii=False)))
     assert restored.damage_state == books["fragile"].damage_state
     assert render_library_book(restored) == views["fragile"]
+
+
+def test_ordinary_holding_can_be_registered_without_becoming_evidence():
+    world = World(seed=42)
+    world.generate(years=30)
+    settlement = next(
+        item for item in world.settlements.values()
+        if world.get_library_books(item.id)
+    )
+    session = PlayerSession(world, settlement.id)
+    shelf = next(
+        item for item in session.local_map["entities"]
+        if item["kind"] == "bookshelf"
+    )
+    _stand_next_to(session, shelf)
+    catalog = session.browse_bookshelf(shelf["id"])
+    book_id = catalog["library_books"][0]["id"]
+    evidence_before = {
+        item_id: item.to_dict() for item_id, item in world.evidence.items()
+    }
+
+    reading = session.read_library_book(book_id)
+    registered = session.register_library_book(book_id)
+
+    assert reading["library_book"]["document"]["document_kind"] == \
+        "ordinary_holding"
+    assert reading["library_book"]["registered"] is False
+    assert registered["library_book"]["registered"] is True
+    assert book_id in session.knowledge.registered_library_book_ids
+    assert book_id not in world.evidence
+    assert {
+        item_id: item.to_dict() for item_id, item in world.evidence.items()
+    } == evidence_before
+    document = next(
+        item for item in registered["journal"]["documents"]
+        if item["id"] == book_id
+    )
+    assert document["document_kind"] == "ordinary_holding"
+    assert document["read"] is True
+
+    restored = PlayerKnowledge.from_dict(session.knowledge.to_dict())
+    assert restored.read_library_book_ids == {book_id}
+    assert restored.registered_library_book_ids == {book_id}
+
+
+def test_historical_document_adapter_preserves_evidence_generation_state():
+    world = World(seed=73)
+    world.generate(years=30)
+    evidence = next(
+        item for item in world.evidence.values()
+        if item.content_data.get("text_plan")
+        or item.content_data.get("written_content")
+    )
+    before = json.loads(json.dumps(evidence.to_dict(), ensure_ascii=False))
+
+    profile = DocumentProfile.from_historical_evidence(evidence).to_dict()
+
+    assert profile["document_kind"] == "historical_source"
+    assert profile["date_label"] == "年代待考"
+    assert "source_event_ids" not in profile
+    assert "created_year" not in profile
+    assert json.loads(json.dumps(
+        evidence.to_dict(), ensure_ascii=False)) == before

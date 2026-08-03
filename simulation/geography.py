@@ -440,6 +440,7 @@ class Geography:
         self.features: list[GeographicFeature] = []
         self._features_by_cell: dict[
             tuple[int, int], list[GeographicFeature]] = {}
+        self._river_flow_thresholds: tuple[float, float] = (0.0, 0.0)
 
     def generate(self):
         """执行完整地理生成管线。"""
@@ -463,6 +464,10 @@ class Geography:
         self.features = generate_geographic_features(
             self.seed, self.biomes, self.heightmap,
             self.rainfall, self.temperature)
+        river_flows = self.flow_accumulation[self.rivers.astype(bool)]
+        if river_flows.size:
+            lower, upper = np.percentile(river_flows, (55, 85))
+            self._river_flow_thresholds = (float(lower), float(upper))
         self._features_by_cell = {}
         for feature in self.features:
             for cell in feature.cells:
@@ -497,6 +502,20 @@ class Geography:
                         and int(self.downstream_y[ny, nx]) == y):
                     connections.add((dx, dy))
         return tuple(sorted(connections, key=lambda item: (item[1], item[0])))
+
+    def river_radius(self, x: int, y: int) -> int:
+        """Return a local-map river radius derived from upstream flow."""
+        if not (0 <= x < self.width and 0 <= y < self.height):
+            return 1
+        if not bool(self.rivers[y, x]):
+            return 1
+        flow = float(self.flow_accumulation[y, x])
+        lower, upper = self._river_flow_thresholds
+        if flow >= upper:
+            return 3
+        if flow >= lower:
+            return 2
+        return 1
 
     def _is_water_cell(self, x: int, y: int) -> bool:
         if not (0 <= x < self.width and 0 <= y < self.height):

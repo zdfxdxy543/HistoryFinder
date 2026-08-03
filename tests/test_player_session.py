@@ -573,12 +573,14 @@ def test_map_sizes_and_geographic_layouts_are_data_driven():
     ]
     assert river_maps
     for local_map in river_maps:
+        assert local_map["profile"]["water_radius"] in {1, 2, 3}
         bridges = [
             (index % local_map["width"], index // local_map["width"])
             for index, tile in enumerate(local_map["tiles"])
             if tile == TILE_BRIDGE
         ]
-        assert len(bridges) >= 6
+        assert len(bridges) >= 2 * (
+            2 * local_map["profile"]["water_radius"] + 1)
         if local_map["profile"]["water_axis"] == "vertical":
             row_counts = Counter(y for _, y in bridges)
             assert max(row_counts.values()) >= 3

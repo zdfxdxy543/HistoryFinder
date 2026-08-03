@@ -130,6 +130,25 @@ def test_hydrology_exposes_real_diagonal_river_connections(geography):
         or geography.heightmap[y + dy, x + dx] <= SEA_LEVEL
 
 
+def test_river_width_classes_follow_flow_accumulation(geography):
+    radii = {
+        geography.river_radius(x, y)
+        for y, x in np.argwhere(geography.rivers.astype(bool))
+    }
+    flows_by_radius = {
+        radius: [
+            float(geography.flow_accumulation[y, x])
+            for y, x in np.argwhere(geography.rivers.astype(bool))
+            if geography.river_radius(x, y) == radius
+        ]
+        for radius in radii
+    }
+
+    assert radii == {1, 2, 3}
+    assert max(flows_by_radius[1]) <= min(flows_by_radius[2])
+    assert max(flows_by_radius[2]) <= min(flows_by_radius[3])
+
+
 def test_biomes_distinguish_water_and_land(geography):
     assert np.all(geography.biomes[geography.heightmap <= SEA_LEVEL] == "ocean")
     assert np.all(geography.biomes[geography.lakes.astype(bool)] == "lake")
