@@ -667,6 +667,31 @@ def test_player_steps_advance_clock_and_start_npc_commutes():
     assert result["runtime"]["turn"] == before["turn"] + 1
 
 
+def test_player_can_run_one_cell_in_half_a_minute():
+    world = World(seed=417)
+    world.generate(years=0)
+    session = PlayerSession(world)
+    before = session.local_time.snapshot()
+
+    result = session.move(-1, 0, "run")
+
+    assert result["moved"] is True
+    assert result["movement_mode"] == "run"
+    assert result["elapsed_minutes"] == 0.5
+    assert result["runtime"]["minute_of_day"] == before["minute_of_day"] + 0.5
+    assert result["runtime"]["turn"] == before["turn"] + 0.5
+    assert result["runtime"]["time_label"] == "06:55:30"
+
+
+def test_player_rejects_unknown_movement_mode():
+    world = World(seed=417)
+    world.generate(years=0)
+    session = PlayerSession(world)
+
+    with pytest.raises(PlayerActionError, match="行走或奔跑"):
+        session.move(-1, 0, "fly")
+
+
 def test_npc_homes_breaks_and_departures_are_distributed():
     world = World(seed=415)
     world.generate(years=0)

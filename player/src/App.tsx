@@ -19,6 +19,7 @@ import {
   EyeOff,
   FileText,
   Footprints,
+  Gauge,
   Globe2,
   Info,
   Hourglass,
@@ -111,6 +112,7 @@ export default function App() {
   const [sessionId, setSessionId] = useState("");
   const [state, setState] = useState<PlayerState | null>(null);
   const [runtime, setRuntime] = useState<RuntimeState | null>(null);
+  const [movementMode, setMovementMode] = useState<"walk" | "run">("walk");
   const [journal, setJournal] = useState<Journal | null>(null);
   const [selected, setSelected] = useState<MapEntity | null>(null);
   const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null);
@@ -151,6 +153,7 @@ export default function App() {
       setSessionId(response.session_id);
       setState(response.state);
       setRuntime(response.state.runtime);
+      setMovementMode("walk");
       setJournal(response.state.journal);
       setSelected(null);
       setActiveEvidenceId(null);
@@ -224,7 +227,12 @@ export default function App() {
   const movePlayer = useCallback(async (dx: number, dy: number) => {
     if (!sessionId) return null;
     try {
-      const result = await performAction(sessionId, { action: "move", dx, dy });
+      const result = await performAction(sessionId, {
+        action: "move",
+        dx,
+        dy,
+        movement_mode: movementMode,
+      });
       if (result.location && result.world_map) {
         setState((current) => current ? {
           ...current,
@@ -252,7 +260,7 @@ export default function App() {
       setNotice(error instanceof Error ? error.message : "无法移动");
       return null;
     }
-  }, [recordTutorialEvent, sessionId]);
+  }, [movementMode, recordTutorialEvent, sessionId]);
 
   const travelTo = useCallback(async (destinationId: string) => {
     if (!sessionId) return;
@@ -543,6 +551,24 @@ export default function App() {
             <button title="向右" onClick={() => move(1, 0)}><ArrowRight /></button>
             <button title="向下" onClick={() => move(0, 1)}><ArrowDown /></button>
           </div>
+          <div className="movement-speed-control movement-mode" role="group" aria-label="移动速度">
+            <button
+              className={movementMode === "walk" ? "active" : ""}
+              title="行走：每分钟一格"
+              aria-pressed={movementMode === "walk"}
+              onClick={() => setMovementMode("walk")}
+            >
+              <Footprints size={13} /> 行走
+            </button>
+            <button
+              className={movementMode === "run" ? "active" : ""}
+              title="奔跑：每半分钟一格"
+              aria-pressed={movementMode === "run"}
+              onClick={() => setMovementMode("run")}
+            >
+              <Gauge size={13} /> 奔跑
+            </button>
+          </div>
         </section>
 
         <aside className={`investigation-dock${tutorialOpen && TUTORIAL_CHAPTERS[tutorialProgress.chapterIndex].steps[tutorialProgress.stepIndex].target === "investigation" ? " tutorial-focus" : ""}`}>
@@ -570,6 +596,7 @@ export default function App() {
                 examined={selectedEvidence ? examinedIds.has(selectedEvidence.id) : false}
                 read={selectedEvidence ? readIds.has(selectedEvidence.id) : false}
                 compareIds={compareIds}
+                examinedIds={examinedIds}
                 detail={detail}
                 busy={busy}
                 evidence={state?.local_map.discovered_evidence ?? []}
@@ -753,6 +780,7 @@ function InspectPanel(props: {
   examined: boolean;
   read: boolean;
   compareIds: string[];
+  examinedIds: Set<string>;
   detail: ActionResult | null;
   busy: boolean;
   evidence: MapEntity[];
@@ -779,6 +807,12 @@ function InspectPanel(props: {
   const visibleEvidence = isContainer
     ? props.evidence.filter((item) => item.container_id === selected.id)
     : props.evidence;
+  const availableCompareEvidence = props.entities.filter(
+    (item) => props.examinedIds.has(item.id) && !props.compareIds.includes(item.id),
+  );
+  const pendingCompareEvidence = props.entities.filter(
+    (item) => !props.examinedIds.has(item.id) && !props.compareIds.includes(item.id),
+  );
   const normalizedQuery = catalogQuery.trim().toLocaleLowerCase();
   const visibleBooks = props.libraryBooks.filter((book) => (
     (catalogGenre === "all" || book.genre === catalogGenre)
@@ -913,7 +947,7 @@ function InspectPanel(props: {
 
       {props.compareIds.length > 0 && (
         <section className="compare-strip">
-          <div>
+          <div className="compare-summary">
             <span>比较栏</span>
             <strong>
               {props.compareIds
@@ -924,6 +958,30 @@ function InspectPanel(props: {
           <button className="icon-command" title="执行比较" disabled={props.compareIds.length !== 2 || props.busy} onClick={props.onCompare}>
             <Scale size={17} />
           </button>
+          {props.compareIds.length === 1 && (
+            <label className="compare-picker">
+              <span>第二件证物</span>
+              <select
+                value=""
+                disabled={props.busy || (!availableCompareEvidence.length && !pendingCompareEvidence.length)}
+                onChange={(event) => {
+                  if (event.target.value) props.onToggleCompare(event.target.value);
+                }}
+              >
+                <option value="">选择已检查证物</option>
+                {availableCompareEvidence.map((item) => (
+                  <option value={item.id} key={item.id}>{item.name}</option>
+                ))}
+                {pendingCompareEvidence.length > 0 && (
+                  <optgroup label="需要先到现场检查">
+                    {pendingCompareEvidence.map((item) => (
+                      <option value={item.id} disabled key={item.id}>{item.name}</option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+            </label>
+          )}
         </section>
       )}
 

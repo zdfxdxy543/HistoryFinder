@@ -22,9 +22,9 @@ data/worlds/
 player/node_modules/
 
 # PyInstaller and packaged releases
-build/
-dist/
-release/
+/build/
+/dist/
+/release/
 
 # Editor and operating-system files
 .idea/

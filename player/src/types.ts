@@ -276,6 +276,7 @@ export type ActionResult = {
   changed_map?: boolean;
   minutes?: number;
   elapsed_minutes?: number;
+  movement_mode?: "walk" | "run";
   location?: Pick<PlayerState, "settlement" | "local_map" | "runtime" | "informants">;
   world_map?: WorldMapState;
   origin?: { id: string; name: string };

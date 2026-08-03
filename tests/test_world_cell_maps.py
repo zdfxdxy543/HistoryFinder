@@ -808,7 +808,12 @@ def test_wilderness_profile_uses_its_named_geographic_feature():
     assert feature.name in local_map["profile"]["feature_names"]
 
 
-def test_player_can_cross_a_walkable_land_boundary():
+@pytest.mark.parametrize(
+    ("movement_mode", "elapsed_minutes"),
+    [("walk", 1.0), ("run", 0.5)],
+)
+def test_player_can_cross_a_walkable_land_boundary(
+        movement_mode, elapsed_minutes):
     world = World(seed=436)
     world.generate(years=0)
     session = PlayerSession(world)
@@ -840,8 +845,10 @@ def test_player_can_cross_a_walkable_land_boundary():
         if position is None:
             continue
         session.local_time.player = {"x": position[0], "y": position[1]}
-        result = session.move(dx, dy)
+        result = session.move(dx, dy, movement_mode)
         assert result["changed_map"]
+        assert result["movement_mode"] == movement_mode
+        assert result["elapsed_minutes"] == elapsed_minutes
         assert session.current_cell == target
         assert result["location"]["local_map"] is session.local_map
         return

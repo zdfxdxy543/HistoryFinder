@@ -128,3 +128,18 @@ def test_explored_tiles_remain_after_the_player_moves():
     assert first < second
     assert (0, 4) in first
     assert (8, 4) in second
+
+
+def test_half_minute_ticks_keep_npcs_on_full_minute_updates():
+    simulation = LocalTimeSimulation(_local_map(), minute_of_day=8 * 60)
+    npc_updates = []
+    simulation._move_npcs_one_tick = lambda: npc_updates.append(
+        simulation.minute_of_day)
+
+    first = simulation.advance(0.5)
+    second = simulation.advance(0.5)
+
+    assert first["time_label"] == "08:00:30"
+    assert first["turn"] == 0.5
+    assert npc_updates == [8 * 60 + 1]
+    assert second["time_label"] == "08:01"

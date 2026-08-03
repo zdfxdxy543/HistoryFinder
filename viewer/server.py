@@ -98,7 +98,10 @@ class PlayerSessionStore:
                     str(payload.get("book_id", "")))
             if action == "move":
                 return session.move(
-                    int(payload.get("dx", 0)), int(payload.get("dy", 0)))
+                    int(payload.get("dx", 0)),
+                    int(payload.get("dy", 0)),
+                    str(payload.get("movement_mode", "walk")),
+                )
             if action == "wait":
                 return session.wait(int(payload.get("minutes", 10)))
             if action == "travel":

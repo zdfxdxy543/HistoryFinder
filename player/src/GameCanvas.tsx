@@ -3,6 +3,8 @@ import Phaser from "phaser";
 import type { LocalMap, MapEntity, RuntimeState } from "./types";
 
 const TILE_SIZE = 32;
+const MOVE_HOLD_DELAY_MS = 240;
+const MOVE_REPEAT_MS = 135;
 const TILE_COLORS = [
   "#55735a", "#9b927d", "#c6c2b5", "#48504c", "#376d86",
   "#676861", "#755f48", "#846a4b", "#b7a47f", "#c19a72",
@@ -31,6 +33,13 @@ type WeatherParticle = {
   size: number;
 };
 
+type MovementDirection = {
+  id: "left" | "right" | "up" | "down";
+  dx: number;
+  dy: number;
+  keys: Phaser.Input.Keyboard.Key[];
+};
+
 class SettlementScene extends Phaser.Scene {
   private mapData: LocalMap;
   private callbacks: SceneCallbacks;
@@ -48,6 +57,8 @@ class SettlementScene extends Phaser.Scene {
   private selectedId: string | null = null;
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
   private keys?: Record<string, Phaser.Input.Keyboard.Key>;
+  private heldDirection: MovementDirection["id"] | null = null;
+  private nextHeldMoveAt = 0;
 
   constructor(map: LocalMap, runtime: RuntimeState, callbacks: SceneCallbacks) {
     super("settlement");
@@ -102,15 +113,42 @@ class SettlementScene extends Phaser.Scene {
     this.emitNearby();
   }
 
-  update(_time: number, delta: number) {
+  update(time: number, delta: number) {
     this.updateWeather(delta);
-    if (this.moving || !this.cursors || !this.keys) return;
+    if (!this.cursors || !this.keys) return;
     const just = Phaser.Input.Keyboard.JustDown;
-    if (just(this.cursors.left) || just(this.keys.A)) this.tryMove(-1, 0);
-    else if (just(this.cursors.right) || just(this.keys.D)) this.tryMove(1, 0);
-    else if (just(this.cursors.up) || just(this.keys.W)) this.tryMove(0, -1);
-    else if (just(this.cursors.down) || just(this.keys.S)) this.tryMove(0, 1);
-    else if (just(this.keys.E) || just(this.keys.SPACE)) this.interact();
+    const directions = this.movementDirections();
+    const newlyPressed = directions.find((direction) =>
+      direction.keys.some((key) => just(key)));
+    const active = newlyPressed ?? directions.find((direction) =>
+      direction.id === this.heldDirection && direction.keys.some((key) => key.isDown))
+      ?? directions.find((direction) => direction.keys.some((key) => key.isDown));
+
+    if (!active) {
+      this.heldDirection = null;
+      this.nextHeldMoveAt = 0;
+    } else if (newlyPressed || active.id !== this.heldDirection) {
+      this.heldDirection = active.id;
+      this.nextHeldMoveAt = time + MOVE_HOLD_DELAY_MS;
+      if (!this.moving) void this.tryMove(active.dx, active.dy);
+    } else if (!this.moving && time >= this.nextHeldMoveAt) {
+      this.nextHeldMoveAt = time + MOVE_REPEAT_MS;
+      void this.tryMove(active.dx, active.dy);
+    }
+
+    if (!this.moving && (just(this.keys.E) || just(this.keys.SPACE))) {
+      this.interact();
+    }
+  }
+
+  private movementDirections(): MovementDirection[] {
+    if (!this.cursors || !this.keys) return [];
+    return [
+      { id: "left", dx: -1, dy: 0, keys: [this.cursors.left, this.keys.A] },
+      { id: "right", dx: 1, dy: 0, keys: [this.cursors.right, this.keys.D] },
+      { id: "up", dx: 0, dy: -1, keys: [this.cursors.up, this.keys.W] },
+      { id: "down", dx: 0, dy: 1, keys: [this.cursors.down, this.keys.S] },
+    ];
   }
 
   private drawMap() {

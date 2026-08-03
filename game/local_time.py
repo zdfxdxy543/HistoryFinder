@@ -90,10 +90,10 @@ BREAK_PLACE_TYPES = (
 class LocalTimeSimulation:
     """Authoritative local clock and movement state for one player session."""
 
-    tick_minutes = 1
+    tick_minutes = 0.5
 
     def __init__(self, local_map: dict, day: int = 1,
-                 minute_of_day: int = 6 * 60 + 55,
+                 minute_of_day: float = 6 * 60 + 55,
                  settle_npcs: bool = False, *, world_seed: int = 0,
                  location_id: str = "local", biome: str = "plains",
                  player_position: tuple[int, int] | None = None,
@@ -124,9 +124,15 @@ class LocalTimeSimulation:
         if settle_npcs:
             self._settle_npcs_at_current_time()
 
-    def move_player(self, dx: int, dy: int) -> dict:
+    def move_player(self, dx: int, dy: int,
+                    elapsed_minutes: float = 1.0) -> dict:
         if abs(dx) + abs(dy) != 1:
             raise ValueError("移动必须是相邻的一个格子。")
+        elapsed_ticks = round(elapsed_minutes / self.tick_minutes)
+        if (elapsed_minutes <= 0
+                or abs(elapsed_ticks * self.tick_minutes
+                       - elapsed_minutes) > 1e-9):
+            raise ValueError("时间必须按 30 秒的整数倍推进。")
         target = (self.player["x"] + dx, self.player["y"] + dy)
         if not self._in_bounds(target):
             direction = (
@@ -154,23 +160,27 @@ class LocalTimeSimulation:
                 or target in self._static_positions):
             return {"moved": False, "runtime": self.snapshot()}
         self.player = {"x": target[0], "y": target[1]}
-        self.advance(self.tick_minutes)
+        self.advance(elapsed_minutes)
         return {"moved": True, "runtime": self.snapshot()}
 
-    def advance(self, minutes: int) -> dict:
-        if minutes <= 0 or minutes % self.tick_minutes:
-            raise ValueError("时间必须按 1 分钟的整数倍推进。")
-        for _ in range(minutes // self.tick_minutes):
-            self.turn += 1
+    def advance(self, minutes: float) -> dict:
+        ticks = round(minutes / self.tick_minutes)
+        if minutes <= 0 or abs(ticks * self.tick_minutes - minutes) > 1e-9:
+            raise ValueError("时间必须按 30 秒的整数倍推进。")
+        for _ in range(ticks):
+            self.turn += self.tick_minutes
             self.minute_of_day += self.tick_minutes
             if self.minute_of_day >= 24 * 60:
                 self.minute_of_day -= 24 * 60
                 self.day += 1
-            self._move_npcs_one_tick()
+            if self.minute_of_day.is_integer():
+                self._move_npcs_one_tick()
         return self.snapshot()
 
     def snapshot(self) -> dict:
-        hour, minute = divmod(self.minute_of_day, 60)
+        whole_minute = int(self.minute_of_day)
+        hour, minute = divmod(whole_minute, 60)
+        second = 30 if self.minute_of_day - whole_minute >= 0.5 else 0
         environment = self._environment_snapshot()
         natural_visible = self._visible_cells(environment["visibility_radius"])
         self._explored_cells.update(natural_visible)
@@ -185,7 +195,10 @@ class LocalTimeSimulation:
         return {
             "day": self.day,
             "minute_of_day": self.minute_of_day,
-            "time_label": f"{hour:02d}:{minute:02d}",
+            "time_label": (
+                f"{hour:02d}:{minute:02d}:{second:02d}"
+                if second else f"{hour:02d}:{minute:02d}"
+            ),
             "period_name": self._period_name(hour),
             "turn": self.turn,
             "full_map_vision": self.full_map_vision,
@@ -239,7 +252,7 @@ class LocalTimeSimulation:
             self.biome,
             ("clear", "clear", "cloudy", "rain", "fog", "storm"),
         )
-        weather_block = self.minute_of_day // (3 * 60)
+        weather_block = int(self.minute_of_day // (3 * 60))
         digest = hashlib.sha256(
             f"weather|{self.world_seed}|{self.location_id}|"
             f"{self.day}|{weather_block}".encode("utf-8")
@@ -339,7 +352,8 @@ class LocalTimeSimulation:
                     entity, "midday_position", work)
             elif travel_path and travel_mode == "loop":
                 cycle = max(1, 2 * len(travel_path) - 2)
-                absolute_minute = (self.day - 1) * 24 * 60 + self.minute_of_day
+                absolute_minute = int(
+                    (self.day - 1) * 24 * 60 + self.minute_of_day)
                 travel_cursor = (
                     absolute_minute + int(entity.get("travel_offset", 0))) % cycle
                 path_index = (travel_cursor if travel_cursor < len(travel_path)
@@ -532,7 +546,7 @@ class LocalTimeSimulation:
     def _move_npcs_one_tick(self) -> None:
         ordered = sorted(self._npcs.values(), key=lambda item: item["id"])
         if ordered:
-            rotation = self.turn % len(ordered)
+            rotation = int(self.turn) % len(ordered)
             ordered = ordered[rotation:] + ordered[:rotation]
         blocked = self._static_positions | {
             (self.player["x"], self.player["y"])}
@@ -662,7 +676,9 @@ class LocalTimeSimulation:
             return path[index], "traveling"
         if npc["kind"] == "wildlife":
             targets = (npc["home"], npc["work"], npc["midday"])
-            phase = (self.turn // 12 + npc["schedule_offset"]) % len(targets)
+            phase = (
+                int(self.turn) // 12 + npc["schedule_offset"]
+            ) % len(targets)
             return targets[phase], "foraging"
         local_minute = (
             self.minute_of_day - npc.get("schedule_offset", 0)) % (24 * 60)

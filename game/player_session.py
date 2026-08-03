@@ -525,18 +525,39 @@ class PlayerSession:
             "dialogue_cn": entity.get("dialogue_cn", ""),
         }, 3)
 
-    def move(self, dx: int, dy: int) -> dict:
+    def move(self, dx: int, dy: int, movement_mode: str = "walk") -> dict:
+        movement_minutes = {"walk": 1.0, "run": 0.5}.get(movement_mode)
+        if movement_minutes is None:
+            raise PlayerActionError("移动模式只能是行走或奔跑。")
+        before_absolute_minute = self._absolute_local_minute()
         try:
-            result = self.local_time.move_player(dx, dy)
+            result = self.local_time.move_player(
+                dx, dy, elapsed_minutes=movement_minutes)
         except ValueError as exc:
             raise PlayerActionError(str(exc)) from exc
         if result.get("exit_map"):
-            return self._move_to_adjacent_cell(result["exit_map"])
+            return self._move_to_adjacent_cell(
+                result["exit_map"], movement_minutes, movement_mode)
         if result.get("moved"):
-            if self._advance_travel_time(1):
+            world_minutes = (
+                int(self._absolute_local_minute())
+                - int(before_absolute_minute)
+            )
+            if world_minutes and self._advance_travel_time(world_minutes):
                 result["local_map"] = self.local_map
                 result["runtime"] = self.local_time.snapshot()
-        return {"action": "move", **result}
+        return {
+            "action": "move",
+            "movement_mode": movement_mode,
+            "elapsed_minutes": movement_minutes if result.get("moved") else 0,
+            **result,
+        }
+
+    def _absolute_local_minute(self) -> float:
+        return (
+            (self.local_time.day - 1) * 24 * 60
+            + self.local_time.minute_of_day
+        )
 
     def wait(self, minutes: int = 10) -> dict:
         if minutes not in {5, 10, 15, 30, 60}:
@@ -803,7 +824,9 @@ class PlayerSession:
         self.local_time._explored_cells.update(
             self._explored_by_cell.get(cell_key(*self.current_cell), set()))
 
-    def _move_to_adjacent_cell(self, exit_data: dict) -> dict:
+    def _move_to_adjacent_cell(self, exit_data: dict,
+                               elapsed_minutes: float = 1.0,
+                               movement_mode: str = "walk") -> dict:
         direction = str(exit_data["direction"])
         dx, dy = {
             "north": (0, -1), "south": (0, 1),
@@ -820,7 +843,12 @@ class PlayerSession:
 
         self._remember_current_exploration()
         next_map = self._map_repository.get(*target)
-        self.world.advance_travel_groups(1)
+        source_absolute_minute = self._absolute_local_minute()
+        world_minutes = int(
+            source_absolute_minute + elapsed_minutes
+        ) - int(source_absolute_minute)
+        if world_minutes:
+            self.world.advance_travel_groups(world_minutes)
         decorate_travel_groups(next_map, self.world)
         fraction = float(exit_data["offset"]) / max(
             1, int(exit_data["span"]) - 1)
@@ -854,13 +882,14 @@ class PlayerSession:
             full_map_vision=self.full_map_vision,
         )
         self._restore_current_exploration()
-        runtime = self.local_time.advance(1)
+        runtime = self.local_time.advance(elapsed_minutes)
         self._sync_discovered_evidence()
         return {
             "action": "move",
             "moved": True,
             "changed_map": True,
-            "elapsed_minutes": 1,
+            "movement_mode": movement_mode,
+            "elapsed_minutes": elapsed_minutes,
             "runtime": runtime,
             "location": self._location_payload(),
             "world_map": self._world_map_payload(),
