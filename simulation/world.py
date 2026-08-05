@@ -890,6 +890,7 @@ class World:
                 state_changed_minute=self.travel_clock_minutes,
                 last_occupied_minute=self.travel_clock_minutes,
                 owner_group_id=group.id,
+                last_owner_group_id=group.id,
             )
             self.wilderness_camps[key] = occupied
         else:

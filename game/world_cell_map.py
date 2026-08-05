@@ -1448,42 +1448,52 @@ def decorate_travel_groups(local_map: dict, world) -> None:
             continue
         route = world.trade_routes[group.route_id]
         destination = world.settlements.get(group.destination_settlement_id)
-        travel_path = []
-        if local_map.get("site_type") == "wilderness" and road_positions:
-            current = (x, y)
-            route_index = route.path.index(current)
-            local_direction = group.direction
-            forward_index = route_index + local_direction
-            if not 0 <= forward_index < len(route.path):
-                local_direction *= -1
-                forward_index = route_index + local_direction
-            backward_index = route_index - local_direction
-            hub_data = local_map.get("profile", {}).get("hub", {})
-            hub = (
-                int(hub_data.get("x", width // 2)),
-                int(hub_data.get("y", height // 2)),
+        if group.group_type == "caravan" and group.status == "camped":
+            continue
+        travel_path = _group_road_path(
+            local_map, route, group, set(road_positions))
+        projected_progress = group.progress_minutes
+        projected_duration = 180
+        departure_camp = next((
+            camp for camp in world.get_camps_at(x, y)
+            if camp.camp_type == "caravan"
+            and camp.state in {"embers", "abandoned"}
+            and camp.last_owner_group_id == group.id
+            and camp.local_center is not None
+        ), None)
+        if departure_camp is not None and travel_path:
+            wagon_position = (
+                departure_camp.local_center[0] + 3,
+                departure_camp.local_center[1] + 1,
             )
-            start_hint = (
-                edge_portal(
-                    route.id, current, route.path[backward_index],
-                    width, height)
-                if 0 <= backward_index < len(route.path) else hub
+            access_path = _path_to_nearest_road(
+                local_map, wagon_position, set(road_positions))
+            road_path = _road_path_between(
+                set(road_positions),
+                access_path[-1] if access_path else wagon_position,
+                travel_path[-1],
             )
-            end_hint = (
-                edge_portal(
-                    route.id, current, route.path[forward_index],
-                    width, height)
-                if 0 <= forward_index < len(route.path) else hub
-            )
-            travel_path = _road_path_between(
-                set(road_positions), start_hint, end_hint)
+            if access_path and road_path:
+                travel_path = access_path[:-1] + road_path
+                departure_elapsed = max(
+                    0,
+                    world.travel_clock_minutes
+                    - departure_camp.last_occupied_minute,
+                )
+                progress_at_departure = max(
+                    0,
+                    group.progress_minutes - departure_elapsed - 1,
+                )
+                projected_progress = departure_elapsed
+                projected_duration = max(1, 180 - progress_at_departure)
         candidates = road_positions or [
             (width // 2 + offset, height // 2)
             for offset in range(-4, 5)]
         if travel_path:
             path_index = min(
                 len(travel_path) - 1,
-                int(group.progress_minutes / 180 * (len(travel_path) - 1)),
+                int(projected_progress / projected_duration
+                    * (len(travel_path) - 1)),
             )
             position = travel_path[path_index]
         else:
@@ -1499,8 +1509,8 @@ def decorate_travel_groups(local_map: dict, world) -> None:
             "destination_name": destination.name if destination else "",
             "travel_path": [[px, py] for px, py in travel_path],
             "travel_clock_mode": "world_progress",
-            "travel_progress": group.progress_minutes,
-            "travel_duration": 180,
+            "travel_progress": projected_progress,
+            "travel_duration": projected_duration,
         }
         if group.group_type == "traveler":
             traveler_data = {
@@ -1591,9 +1601,33 @@ def _decorate_wilderness_camps(local_map: dict, world) -> None:
     }
     for camp in camps:
         specs = _camp_component_specs(camp.state)
-        center = _camp_center(
-            tiles, width, height, roads, occupied,
-            tuple((dx, dy) for _, dx, dy, _ in specs), camp.layout_seed)
+        center = camp.local_center
+        if center is None:
+            preferred = None
+            group = world.travel_groups.get(camp.owner_group_id)
+            route = (
+                world.trade_routes.get(group.route_id)
+                if group is not None else None
+            )
+            if group is not None and route is not None:
+                group_path = _group_road_path(
+                    local_map, route, group, roads)
+                if group_path:
+                    path_index = min(
+                        len(group_path) - 1,
+                        int(group.progress_minutes / 180
+                            * (len(group_path) - 1)),
+                    )
+                    preferred = group_path[path_index]
+            layout_specs = _camp_component_specs("occupied")
+            center = _camp_center(
+                tiles, width, height, roads, occupied,
+                tuple((dx, dy) for _, dx, dy, _ in layout_specs),
+                camp.layout_seed,
+                preferred=preferred,
+                preferred_offset=(3, 1),
+            )
+            camp.local_center = center
         if center is None:
             continue
         zone = {
@@ -1626,6 +1660,8 @@ def _decorate_wilderness_camps(local_map: dict, world) -> None:
                     "camp_id": camp.id,
                     "camp_state": camp.state,
                     "owner_group_id": camp.owner_group_id,
+                    "last_owner_group_id": camp.last_owner_group_id,
+                    "camp_center": [center[0], center[1]],
                     "component_type": component,
                 },
             ))
@@ -1644,21 +1680,21 @@ def _camp_component_specs(state: str) -> tuple[tuple[str, int, int, bool], ...]:
         )
     if state == "embers":
         return (
-            ("campfire_embers", 0, 0, False),
-            ("camp_bedroll", -2, 1, False),
-            ("camp_tracks", 2, 1, False),
-            ("camp_supplies", -3, -1, True),
+            ("campfire_embers", 0, 1, False),
+            ("camp_bedroll", -1, 3, False),
+            ("camp_tracks", 2, 3, False),
+            ("camp_supplies", -3, 1, True),
         )
     if state == "abandoned":
         return (
             ("camp_tent_collapsed", -2, -1, True),
-            ("campfire_cold", 1, 0, False),
-            ("camp_crate_broken", 3, 1, True),
-            ("camp_tracks", -1, 2, False),
+            ("campfire_cold", 0, 1, False),
+            ("camp_crate_broken", -3, 1, True),
+            ("camp_tracks", 2, 3, False),
         )
     return (
-        ("campfire_ring", 0, 0, False),
-        ("camp_ruts", 2, 1, False),
+        ("campfire_ring", 0, 1, False),
+        ("camp_ruts", 3, 1, False),
     )
 
 
@@ -1666,7 +1702,10 @@ def _camp_center(tiles: list[int], width: int, height: int,
                  roads: set[tuple[int, int]],
                  occupied: set[tuple[int, int]],
                  offsets: tuple[tuple[int, int], ...],
-                 seed: int) -> tuple[int, int] | None:
+                 seed: int,
+                 preferred: tuple[int, int] | None = None,
+                 preferred_offset: tuple[int, int] = (0, 0),
+                 ) -> tuple[int, int] | None:
     candidates = []
     for y in range(4, height - 4):
         for x in range(4, width - 4):
@@ -1683,10 +1722,16 @@ def _camp_center(tiles: list[int], width: int, height: int,
             if roads and not 2 <= road_distance <= 8:
                 continue
             rank = _stable_int(str(seed), str(x), str(y))
-            candidates.append((abs(road_distance - 4), rank, x, y))
+            preferred_distance = (
+                abs(x + preferred_offset[0] - preferred[0])
+                + abs(y + preferred_offset[1] - preferred[1])
+                if preferred is not None else 0
+            )
+            candidates.append((
+                preferred_distance, abs(road_distance - 4), rank, x, y))
     if not candidates:
         return None
-    _, _, x, y = min(candidates)
+    _, _, _, x, y = min(candidates)
     return x, y
 
 
@@ -1723,6 +1768,74 @@ def _camp_component_text(component: str, state: str) -> tuple[str, str, str, str
     }
     return data.get(component, (
         "营地遗物", "营地组成", "wood", f"这件遗物属于一处{state}状态的荒野营地。"))
+
+
+def _group_road_path(local_map: dict, route, group,
+                     roads: set[tuple[int, int]]) -> list[tuple[int, int]]:
+    if local_map.get("site_type") != "wilderness" or not roads:
+        return []
+    cell = local_map.get("cell", {})
+    current = (int(cell.get("x", -1)), int(cell.get("y", -1)))
+    if current not in route.path:
+        return []
+    width, height = local_map["width"], local_map["height"]
+    route_index = route.path.index(current)
+    local_direction = group.direction
+    forward_index = route_index + local_direction
+    if not 0 <= forward_index < len(route.path):
+        local_direction *= -1
+        forward_index = route_index + local_direction
+    backward_index = route_index - local_direction
+    hub_data = local_map.get("profile", {}).get("hub", {})
+    hub = (
+        int(hub_data.get("x", width // 2)),
+        int(hub_data.get("y", height // 2)),
+    )
+    start_hint = (
+        edge_portal(
+            route.id, current, route.path[backward_index], width, height)
+        if 0 <= backward_index < len(route.path) else hub
+    )
+    end_hint = (
+        edge_portal(
+            route.id, current, route.path[forward_index], width, height)
+        if 0 <= forward_index < len(route.path) else hub
+    )
+    return _road_path_between(roads, start_hint, end_hint)
+
+
+def _path_to_nearest_road(local_map: dict, start: tuple[int, int],
+                          roads: set[tuple[int, int]],
+                          ) -> list[tuple[int, int]]:
+    width, height = local_map["width"], local_map["height"]
+    blocking = set(local_map["blocking_tiles"])
+    if not (0 <= start[0] < width and 0 <= start[1] < height):
+        return []
+    queue = deque([start])
+    previous: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
+    target = None
+    while queue:
+        current = queue.popleft()
+        if current in roads:
+            target = current
+            break
+        for dx, dy in ((0, -1), (-1, 0), (1, 0), (0, 1)):
+            neighbor = current[0] + dx, current[1] + dy
+            if (neighbor in previous
+                    or not 0 <= neighbor[0] < width
+                    or not 0 <= neighbor[1] < height
+                    or local_map["tiles"][
+                        neighbor[1] * width + neighbor[0]] in blocking):
+                continue
+            previous[neighbor] = current
+            queue.append(neighbor)
+    if target is None:
+        return []
+    path = [target]
+    while previous[path[-1]] is not None:
+        path.append(previous[path[-1]])
+    path.reverse()
+    return path
 
 
 def _road_path_between(roads: set[tuple[int, int]],

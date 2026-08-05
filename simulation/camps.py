@@ -21,6 +21,8 @@ class WildernessCamp:
     state_changed_minute: int
     last_occupied_minute: int
     owner_group_id: str = ""
+    last_owner_group_id: str = ""
+    local_center: tuple[int, int] | None = None
     revision: int = 1
     schema_version: int = 1
 
@@ -36,12 +38,19 @@ class WildernessCamp:
             "state_changed_minute": self.state_changed_minute,
             "last_occupied_minute": self.last_occupied_minute,
             "owner_group_id": self.owner_group_id,
+            "last_owner_group_id": self.last_owner_group_id,
+            "local_center": (
+                list(self.local_center) if self.local_center is not None
+                else None
+            ),
             "revision": self.revision,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "WildernessCamp":
         cell = data["world_cell"]
+        center = data.get("local_center")
+        owner_group_id = str(data.get("owner_group_id", ""))
         return cls(
             id=str(data["id"]),
             world_cell=(int(cell[0]), int(cell[1])),
@@ -51,7 +60,13 @@ class WildernessCamp:
             established_minute=int(data.get("established_minute", 0)),
             state_changed_minute=int(data.get("state_changed_minute", 0)),
             last_occupied_minute=int(data.get("last_occupied_minute", 0)),
-            owner_group_id=str(data.get("owner_group_id", "")),
+            owner_group_id=owner_group_id,
+            last_owner_group_id=str(data.get(
+                "last_owner_group_id", owner_group_id)),
+            local_center=(
+                (int(center[0]), int(center[1]))
+                if center is not None else None
+            ),
             revision=int(data.get("revision", 1)),
             schema_version=1,
         )
@@ -60,6 +75,7 @@ class WildernessCamp:
         changed = self.state != "occupied" or self.owner_group_id != owner_group_id
         self.state = "occupied"
         self.owner_group_id = owner_group_id
+        self.last_owner_group_id = owner_group_id
         self.last_occupied_minute = minute
         if changed:
             self.state_changed_minute = minute
